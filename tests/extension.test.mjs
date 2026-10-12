@@ -118,15 +118,36 @@ test('handoff settlement observes only persisted successful tool IDs and new inp
 test('single extension registers all agreed tools without starting resources in factory', async () => {
   const tools = new Map(), events = new Map();
   extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
-  assert.equal(tools.size, 15);
+  assert.equal(tools.size, 16);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
   assert.match(tools.get('intercom_reload_worker').description, /NOT Pi extension reload/);
+  assert.match(tools.get('intercom_stop_reminders').description, /Coordinator only/);
+  assert.deepEqual(Object.keys(tools.get('intercom_stop_reminders').parameters.properties), []);
   await assert.rejects(tools.get('intercom_list').execute('test', {}, undefined, undefined, {}), /not initialized/);
   await events.get('session_shutdown')();
   await events.get('session_shutdown')();
+});
+
+test('reminder stop tool routes through runtime with the owning cancellation signal', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  const original = Intercom.prototype.tool;
+  const controller = new AbortController();
+  let received;
+  Intercom.prototype.tool = async function(operation, args, id, signal) {
+    received = { operation, args, id, signal };
+    return { stopped: true };
+  };
+  t.after(() => { Intercom.prototype.tool = original; });
+  const tool = a.tools.get('intercom_stop_reminders');
+  const result = await tool.execute('stop-test', {}, controller.signal, undefined, a.ctx);
+  assert.deepEqual(received, { operation: 'stop_reminders', args: {}, id: 'stop-test', signal: controller.signal });
+  assert.deepEqual(JSON.parse(result.content[0].text), { stopped: true });
+  received = undefined; controller.abort();
+  await assert.rejects(tool.execute('cancelled', {}, controller.signal, undefined, a.ctx), /abort/i);
+  assert.equal(received, undefined, 'an already-cancelled tool must not reach runtime');
 });
 
 test('adapter rejects untrusted/noninteractive startup before creating config', supportedHost, async t => {

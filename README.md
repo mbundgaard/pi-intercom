@@ -26,6 +26,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 >
+> **0.7.0:** Coordinator-local five-minute reminders follow worker calls. Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
+
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
 
 For potential next steps, see [Improvement topics](references/roadmap.md). These are proposals for discussion, not implemented features or release commitments.
@@ -128,6 +130,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
 | `intercom_worker_status` | `name?`, `offset?`, `limit?`, `probe?` | Configured sessions; local JSON by default, optional bounded endpoint checks for returned page |
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
+| `intercom_stop_reminders` | None | Coordinator; disable reminder timer until another qualifying worker call, without cancelling work |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
 | `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator, never approve/complete work |
 | `intercom_stop_worker` | `to` | Unsupported graceful cancellation; no side effects |
@@ -140,6 +143,27 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 **Removal precondition:** close a running worker before removing its entry. Removal forgets the registration; it is not how to park a worker for later resume. Active/uncertain close jobs fence removal and other lifecycle/work operations. Saved IDs/ports alone do not prove closure; no force-kill fallback occurs.
 
 Anonymous `send`/`list` and all coordinator operations fail explicitly. Anonymous registration and status remain available. A dedicated repeat-registration operation and broader anonymous permissions remain **unresolved contract TODOs**, not silently added tools. If initial registration fails, the worker remains reachable and reports the error locally. Explicit user Pi `/reload` restarts this extension and repeats startup registration; status is not a substitute and there is no automatic retry.
+
+### Coordinator reminders (0.7.0)
+
+A coordinator-local timer wakes an idle agent to review delegated work. It is **not** an endpoint health ping, task assignment, worker retry, or crashed-process watchdog. It starts disarmed and does not change shared config or the wire protocol.
+
+- Valid coordinator calls to create, configure, resume, reload, request status from, message, or close a worker start/reset the timer **before the attempted operation**. A subsequent operation failure can still need follow-up, so it does not automatically cancel the timer.
+- Every five minutes, recheck coordinator identity and whether Pi is idle. Busy ticks are skipped, not queued. Worker replies, incoming reports, list/JSON status reads (including probes), and worker-to-worker/coordinator messages do not reset it.
+- `intercom_stop_reminders({})` disables reminders until the next qualifying call. It does not cancel workers, close jobs or model work. There is no automatic reminder-count cutoff.
+- Timers are in memory only. Shutdown, Pi `/reload`, or session replacement disposes them; startup does not restore or replay them. Reset/stop invalidates stale callbacks and older in-flight calls cannot re-arm after a later stop.
+- Aborting the owning tool's Pi run also disarms its reminder generation when that AbortSignal is available. This is **not universal Escape/Stop detection**: the host may later be in a separate retry/compaction run whose abort does not reach the original signal. Use the explicit stop tool to disable reminders reliably.
+- Reminder delivery uses Pi's existing user-message path. Host input rejection remains possible (including the documented compaction gap); reminders are not immediately retried. The next normal tick is a new periodic check, not proof of prior delivery.
+
+The reminder contains only this fixed public text, never task payloads or private reasoning:
+
+> Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.
+>
+> If there is genuinely nothing to follow up on, call `intercom_stop_reminders`. Otherwise, reminders continue every five minutes; a new worker call resets the timer.
+>
+> This reminder does not authorize new work, retries, worker closure, or publication.
+
+Reload the coordinator's extension to register the new tool and timer logic. No existing live session is armed merely by installing the change.
 
 ## Config and wire contracts
 
@@ -278,6 +302,14 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.7.0 Coordinator reminders
+
+- Valid coordinator worker calls arm/reset a five-minute reminder using fixed public text. Failed attempted operations can still need follow-up; incoming reports and read-only status queries do not reset the timer.
+- New coordinator-only `intercom_stop_reminders` disables reminders until the next qualifying worker call. No automatic reminder-count cutoff, worker retry, closure or publication is authorized.
+- Busy ticks are skipped without a backlog; stale callbacks and older in-flight calls are fenced. Shutdown/reload/session replacement clears ephemeral timer state.
+- Owning-run AbortSignal cancellation is supported where available, but is not universal detection of later Escape/Stop during separate retry/compaction runs.
+- Local validation: 183 tests, typecheck and isolated package-install checks. Update and reload the coordinator to activate the new tool; startup itself does not arm reminders.
 
 ### 0.6.1 Background handoff-and-close and quiet startup
 
