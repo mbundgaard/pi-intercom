@@ -6,11 +6,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/comput-sh/pi-intercom.git"
+    "url": "git+https://github.com/mbundgaard/pi-intercom.git"
   },
-  "homepage": "https://github.com/comput-sh/pi-intercom#readme",
+  "homepage": "https://github.com/mbundgaard/pi-intercom#readme",
   "bugs": {
-    "url": "https://github.com/comput-sh/pi-intercom/issues"
+    "url": "https://github.com/mbundgaard/pi-intercom/issues"
   },
   "version": "0.7.0",
   "description": "A coordinator-led workspace for Pi. Delegate to workers with separate contexts, evaluate their reports, and keep the main conversation focused—with the team visible alongside it.",
