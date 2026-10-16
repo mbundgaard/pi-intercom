@@ -19,13 +19,13 @@ This is the consolidated **target design**, authoritative over conflicting wordi
 
 Location: `<coordinator-root>/.pi-intercom/config.json`.
 
-- Discover by searching upward from the Pi working directory.
-- When genuinely absent, become coordinator and create it under the current working directory, which becomes the coordinator root. Do not infer a Git or solution root.
+- Root-isolation revision (0.8.0): select only the config in the session working directory. Never search ancestors or infer a Git/home root. `--intercom-root` is a same-directory assertion: its canonical path must equal cwd before its config is read. It cannot authorize reading a parent config.
+- Without an explicit workspace root, when the exact local config is genuinely absent, become coordinator and create it under the current working directory. Explicit workspace mode requires an existing valid config and never creates a replacement coordinator. Do not infer a Git or solution root.
 - Initial creation is atomic: only one session targeting the same path becomes coordinator. Other contenders wait for usable config and register as workers.
 - Invalid or unreadable config is an error, not absence. Leave it untouched.
 - The configuration is checked into source control. It includes session IDs and ports; do not split these into a separate runtime configuration.
 - Only coordinator extension code may write it. Workers read only. No attempt to restrict ordinary Pi shell/file tools.
-- Worker directories must be the coordinator root or descendants, stored relative to that root.
+- Saved worker directories remain root-relative. Shared-roster worker create/resume requires the coordinator root itself; descendant launches are rejected before side effects. Old descendant entries/history are retained, not silently relocated.
 - Entries survive process closure. Saved Pi session paths are not stored; resume uses session ID and project directory.
 
 Required configuration information:
@@ -55,7 +55,7 @@ A known session restores its configured role. Any unknown session ID with existi
 ### Anonymous worker
 
 1. Coordinator launches a new Pi session in its project directory with this extension loaded.
-2. Worker discovers shared config and starts a localhost endpoint using an OS-selected port.
+2. Worker verifies its explicit root equals its working directory, validates only that directory's config, then starts a localhost endpoint using an OS-selected port.
 3. Worker reports session ID, port, and project directory to the configured coordinator.
 4. Coordinator extension notifies its agent using normal prompt delivery if idle, steering if busy.
 5. Worker remains anonymous and waits. Registration does not create a placeholder config entry or authorize work.

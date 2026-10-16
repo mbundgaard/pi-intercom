@@ -54,9 +54,9 @@ test('settings-based saved session passes resume preflight; missing ID never lau
   let launches = 0;
   const launcher = launchers({ extension: '/test/index.ts', platform: 'win32', env: {}, sessionExists,
     run: async () => { launches++; return '12345'; } });
-  const result = await launcher.launch({ multiplexer: 'none', cwd: f.cwd, sessionId: id });
+  const result = await launcher.launch({ multiplexer: 'none', cwd: f.cwd, workspaceRoot: f.cwd, sessionId: id });
   assert.equal(result.terminalLaunched, true);
   assert.equal(launches, 1);
-  await assert.rejects(launcher.launch({ multiplexer: 'none', cwd: f.cwd, sessionId: 'missing' }), /saved Pi session not found/);
+  await assert.rejects(launcher.launch({ multiplexer: 'none', cwd: f.cwd, workspaceRoot: f.cwd, sessionId: 'missing' }), /saved Pi session not found/);
   assert.equal(launches, 1);
 });

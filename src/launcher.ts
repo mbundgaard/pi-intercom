@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import path from 'node:path';
 import { fail } from './config.js';
 import type { LaunchRequest } from './runtime.js';
 
@@ -23,9 +24,16 @@ export function launchers(options: LauncherOptions) {
   async function launch(request: LaunchRequest): Promise<unknown> {
     const platform = options.platform ?? process.platform;
     if (platform !== 'win32' && platform !== 'linux') fail('launchers support Windows and Linux only');
+    const paths = platform === 'win32' ? path.win32 : path.posix;
+    if (typeof request.workspaceRoot !== 'string' || !request.workspaceRoot.trim() || request.workspaceRoot.includes('\0') || !paths.isAbsolute(request.workspaceRoot)) fail('worker launch requires an explicit absolute workspace root');
+    // Runtime performs authoritative realpath equality before reading config.
+    // Defend direct launcher calls too, without filesystem access or cwd rewrites.
+    const samePath = (value: string) => platform === 'win32' ? paths.resolve(value).toLowerCase() : paths.resolve(value);
+    if (typeof request.cwd !== 'string' || !paths.isAbsolute(request.cwd) || samePath(request.workspaceRoot) !== samePath(request.cwd)) fail('worker workspace root must equal its working directory; parent workspace access is not allowed');
     if (platform === 'linux' && request.multiplexer === 'none') fail('Linux worker launching requires Herdr; none is Windows-only. No terminal fallback');
     if (request.sessionId && !await options.sessionExists(request.cwd, request.sessionId)) fail('saved Pi session not found in project directory; never-used sessions may not be persisted. Config unchanged; no replacement launched');
-    const args = ['-e', options.extension, ...(request.sessionId ? ['--session', request.sessionId] : [])];
+    // Explicit per-child CLI scope cannot widen cwd or leak from a parent shell environment.
+    const args = ['-e', options.extension, '--intercom-root', request.workspaceRoot, ...(request.sessionId ? ['--session', request.sessionId] : [])];
     if (request.multiplexer === 'herdr') {
       if (env.HERDR_ENV !== '1' || !env.HERDR_WORKSPACE_ID) fail('Herdr launcher requires this Pi to run inside a Herdr-managed workspace; no fallback');
       let created: { result?: { root_pane?: { pane_id?: string }; tab?: { tab_id?: string } } };

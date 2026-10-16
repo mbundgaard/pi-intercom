@@ -26,6 +26,8 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.5.1:** manually closed workers remain registered and sort last as disconnected in the monitor. Optional JSON health checks and guarded resume preserve the distinction between connectivity and saved session identity.
 >
+> **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
+
 > **0.7.0:** Coordinator-local five-minute reminders follow worker calls. Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
 
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
@@ -102,13 +104,17 @@ Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headl
 
 ### Startup and launchers
 
-Without shared config, the current working directory becomes the coordinator root. Startup creates `.pi-intercom/config.json`, opens a loopback listener, synchronizes the name `Coordinator`, and waits for user input (no model turn). Existing config is found by walking upward. Invalid/unreadable config is an error and is not overwritten. Unknown session IDs, including forks, are workers, never replacement coordinators.
+**Strict root isolation (0.8.0):** The session's starting working directory is its config root. An explicit flag cannot widen this boundary. Only `<root>/.pi-intercom/config.json` is considered: there is no upward search, Git-root inference, or home-directory fallback. If that exact config is absent, startup creates a local coordinator config, opens a loopback listener, preserves the session/tab name, and waits for user input (no model turn). Invalid/unreadable local config is an error and is not overwritten. A session ID absent from an existing selected config, including a fork, is a worker, never a replacement coordinator.
+
+Created/resumed workers receive `--intercom-root /absolute/session/root` explicitly as a same-directory assertion, **not permission to read a parent config**. The supplied root must canonically equal the session working directory, and its exact config must already exist. A mismatched root is rejected before reading its config or creating startup resources. No environment variable selects a parent root. Shared-roster workers must start in the coordinator's root; create/resume requests for subfolders are rejected before launch instead of silently changing the working directory. Linked metadata/config paths that escape the root and stable redirects of an already validated root are rejected. Monitor/logging readers retain stricter rules and may reject even internal links. These guards cover config access and temporary-config cleanup. They do not sandbox all filesystem I/O, pin an already-running telemetry writer after filesystem changes, or provide an atomic defense against concurrent filesystem replacement.
+
+**Upgrade note:** Existing subfolder workers cannot rejoin a parent roster by supplying a flag. Their saved history/config entries are retained, but launching them in a subfolder with the parent's config is refused. Use workers whose configured directory is the coordinator root, and explicitly describe any subfolder work in their assignment. Independent sessions started in subfolders use only their own local config; ancestor files are left untouched.
 
 Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
 
 ## Explicit workflow
 
-1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. No worker identity, responsibility, callback address or special config path is passed.
+1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. The launcher passes the same-directory root assertion; no worker identity, responsibility or callback address is passed.
 2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry or hidden pending-registration map**.
 3. Coordinator decides and calls `intercom_configure_worker` with **all five explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`. This only writes config.
 4. Coordinator separately calls `intercom_reload_worker({to:"Builder"})`. Worker rereads responsibility and synchronizes Pi/Herdr tab names. **This is not Pi `/reload`, a restart, cancellation, or work assignment.** No model turn starts.
@@ -123,7 +129,7 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 
 | Tool | Arguments | Permission / effect |
 |---|---|---|
-| `intercom_create_worker` | `projectDirectory?` (default `.`) | Coordinator; launch anonymous worker |
+| `intercom_create_worker` | `projectDirectory?` (default `.`) | Coordinator; launch anonymous worker at the same root only |
 | `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description` | Coordinator; all five explicit fields, writes only |
 | `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
@@ -302,6 +308,14 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
 
 Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+
+### 0.8.0 Strict session-root isolation
+
+- Never search parent folders for config, even when a local config is missing or malformed. An explicit root must canonically equal the session working directory; it cannot permit a parent config.
+- Validate before startup resources, reject escaping/dangling config links and stable root redirects, and guard temporary-config cleanup. These are config protections, not a filesystem sandbox or atomic TOCTOU guarantee.
+- Created/resumed workers receive an explicit same-directory root assertion. Shared-config subfolder launches are now rejected, not silently relocated. Existing registrations/history remain intact.
+- Includes the coordinator reminders from the preserved 0.7.0 GitHub release, whose npm publication was blocked by authorization after the repository transfer.
+- Local validation: 205 tests, typecheck and isolated package-install checks passed. Native Windows/Linux CI gates publication.
 
 ### 0.7.0 Coordinator reminders
 

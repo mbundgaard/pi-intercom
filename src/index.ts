@@ -11,7 +11,7 @@ import { createCloseProvider } from './pane-close.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
 const tools: [string, string, TSchema][] = [
-  ['create_worker', 'Coordinator only. Launch one anonymous worker in projectDirectory (default root). No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()) })],
+  ['create_worker', 'Coordinator only. Launch one anonymous worker at the coordinator root. projectDirectory defaults to root and must resolve to that same directory; subfolder launches cannot use a parent config and are refused. No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()) })],
   ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }) })],
   ['reload_worker', 'Coordinator only. Ask worker to reread responsibility and synchronize names. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
   ['send', 'Configured sessions only. Send an explicit work/progress/findings message by recipient name. Idle delivery starts a turn; busy delivery steers at supported boundaries. Receipt is not an agent reply. Progress questions do not cancel assignments.', Type.Object({ to: Type.String(), message: Type.String({ minLength: 1, maxLength: 48000 }) })],
@@ -24,7 +24,7 @@ const tools: [string, string, TSchema][] = [
   ['stop_worker', UNSUPPORTED_CANCELLATION, to],
   ['close_worker', 'Coordinator only. Begin a background save-handoff-and-close job for a configured worker in Linux Herdr. Requests a public summary, saves it in config, waits for successful tool persistence and final turn settlement, then attempts one verified pane close. Returns job acceptance, not completion. Registration/session history are retained. Check worker_status/list for closeJob; failure/timeout/uncertainty never authorizes retry. Not graceful abort or an all-descendants termination guarantee; Windows/non-Herdr unsupported.', to],
   ['report_handoff', 'Configured worker only, in response to its pending close request. Submit the matching jobId and concise public resume handoff (current work, completed work, unfinished items, blockers, next step). Never include secrets, private reasoning or raw tool payloads. Saved receipt is not closure: finish the response and wait; the extension requires final turn settlement before pane closure.', Type.Object({ jobId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 4000 }) })],
-  ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
+  ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. Saved subfolder launches are refused rather than relocated, because a worker cannot use a parent config. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
   ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Retain registration to resume it later; remove only to forget it. Pending or uncertain close jobs block removal.', to],
   ['set_multiplexer', 'Coordinator only. Set herdr (default, Windows/Linux) or none (separate visible Windows terminals; unsupported on Linux) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
@@ -47,6 +47,10 @@ class PiConfigStore extends ConfigStore {
   }
 }
 export default function intercomExtension(pi: ExtensionAPI): void {
+  pi.registerFlag('intercom-root', {
+    type: 'string',
+    description: 'Explicit Intercom root must equal this session cwd; parent configuration is never allowed, even with this flag.',
+  });
   let runtime: Intercom | undefined;
   let context: ExtensionContext | undefined;
   let generation = 0;
@@ -97,6 +101,10 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     context = ctx;
     if (!['win32', 'linux'].includes(process.platform) || ctx.mode !== 'tui') throw new Error('PiIntercom requires Windows or Linux interactive Pi. No resources started.');
     if (!ctx.isProjectTrusted()) throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
+    // Flags become available at session_start, not extension factory time. Never
+    // infer workspace authority from ancestors or inherited environment values.
+    const workspaceRoot = pi.getFlag('intercom-root');
+    if (workspaceRoot !== undefined && typeof workspaceRoot !== 'string') throw new Error('PiIntercom: intercom-root must be an explicit absolute path.');
     runtime = new Intercom({
       cwd: ctx.cwd,
       sessionId: () => context!.sessionManager.getSessionId(),
@@ -107,7 +115,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
-      launch: launcher.launch, store: root => new PiConfigStore(root),
+      launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot,
       closeProvider: createCloseProvider({
         sessionId: () => context!.sessionManager.getSessionId(),
         sessionFile: () => context!.sessionManager.getSessionFile(),

@@ -445,9 +445,15 @@ test('a delayed preflight status write is not a post-launch announcement', async
 test('worker removal during directory resolution is rechecked before resume launch', async t => {
   const { c, launches } = await configured(t);
   const store = c.runtime.store, root = store.root, state = c.runtime.state.bind(c.runtime);
-  let pending, triggered = false;
+  const probe = c.runtime.options.probe;
+  let pending, triggered = false, armed = false;
+  c.runtime.options.probe = async (...args) => {
+    const result = await probe(...args);
+    armed = true; // Target lookup and probe must finish before injecting removal.
+    return result;
+  };
   Object.defineProperty(store, 'root', { get() {
-    if (!triggered) {
+    if (armed && !triggered) {
       triggered = true;
       pending = store.update('c', config => { config.agents = config.agents.filter(a => a.sessionId !== 'w'); });
     }
@@ -455,6 +461,7 @@ test('worker removal during directory resolution is rechecked before resume laun
   } });
   c.runtime.state = async () => { if (pending) await pending; return state(); };
   await assert.rejects(c.runtime.tool('resume_worker', {to:'Builder',confirmClosed:true}), /configuration changed/);
+  assert.equal(triggered, true);
   assert.equal(launches.length,0);
 });
 test('changed worker endpoint during resume check prevents launch', async t => {

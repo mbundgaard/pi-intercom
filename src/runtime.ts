@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
 import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, type Agent, type Config } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
@@ -19,7 +20,7 @@ export interface Host {
   setName(name: string): Promise<void>;
   notify(text: string): void;
 }
-export interface LaunchRequest { multiplexer: 'herdr' | 'none'; cwd: string; sessionId?: string }
+export interface LaunchRequest { multiplexer: 'herdr' | 'none'; cwd: string; workspaceRoot: string; sessionId?: string }
 export interface RuntimeOptions {
   launch(request: LaunchRequest): Promise<unknown>;
   listen?: typeof listen;
@@ -31,6 +32,8 @@ export interface RuntimeOptions {
   /** Test seam; production defaults to 120 seconds, values above that are capped. */
   closeTimeoutMs?: number;
   reminderClock?: ReminderClock;
+  /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
+  workspaceRoot?: string;
 }
 export class Intercom {
   store!: ConfigStore;
@@ -38,6 +41,8 @@ export class Intercom {
   private active = false;
   private generation = 0;
   private initialId = '';
+  private configuredRoot?: string;
+  private configuredFile?: string;
   responsibility?: Agent;
   private observer?: Observer;
   private closing?: Promise<void>;
@@ -62,6 +67,7 @@ export class Intercom {
   private id(): string {
     const id = this.host.sessionId();
     if (!this.active || id !== this.initialId) fail('session is inactive or replaced');
+    if (this.configuredRoot !== undefined && (this.store.root !== this.configuredRoot || this.store.file !== this.configuredFile)) fail('config store boundary changed');
     return id;
   }
   private validity(): () => void {
@@ -76,19 +82,27 @@ export class Intercom {
     if (this.closing) await this.closing;
     if (this.active) fail('runtime already active');
     this.initialId = this.host.sessionId(); this.active = true;
+    this.configuredRoot = undefined; this.configuredFile = undefined;
     this.probeController = new AbortController();
     this.resumeFences.clear();
     const generation = ++this.generation, assertValid = this.validity();
     let record = this.captureObserver();
     try {
-      const discovered = await ConfigStore.discover(this.host.cwd);
+      const discovered = this.options.workspaceRoot !== undefined
+        ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
+        : await ConfigStore.discover(this.host.cwd);
       assertValid();
-      this.store = this.options.store?.(discovered?.root ?? this.host.cwd) ?? discovered ?? new ConfigStore(this.host.cwd);
+      const root = discovered?.root ?? await realpath(this.host.cwd);
+      assertValid();
+      this.store = this.options.store?.(root) ?? discovered ?? new ConfigStore(root);
+      if (this.store.root !== root || this.store.file !== path.join(root, '.pi-intercom', 'config.json')) fail('config store must retain validated session root');
+      this.configuredRoot = root; this.configuredFile = this.store.file;
+      await this.store.validateRoot(root); assertValid();
+      const previous = discovered ? await this.store.read() : undefined;
+      assertValid();
       try { this.observer = this.options.observe ? this.options.observe(this.store.root, this.initialId) : new LocalObserver(this.store.root, this.initialId); } catch { /* Logging is optional on failure. */ }
       record = this.captureObserver();
       record('runtime.starting');
-      const previous = discovered ? await this.store.read() : undefined;
-      assertValid();
       const own = previous?.agents.find(a => a.sessionId === this.id());
       const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
         assertValid();
@@ -432,8 +446,9 @@ export class Intercom {
     if (operation === 'create_worker') {
       const relative = await directory(this.store.root, (args.projectDirectory as string | undefined) ?? '.');
       assertValid();
+      if (relative !== '.') fail('worker working directory must equal the config root; subdirectory launches would read a forbidden parent config');
       armReminder();
-      return this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative) });
+      return this.launchObserved({ multiplexer: config.multiplexer, cwd: path.resolve(this.store.root, relative), workspaceRoot: this.store.root });
     }
     const target = named(config, args.to as string);
     if (target.coordinator) fail('operation requires a worker target');
@@ -453,6 +468,13 @@ export class Intercom {
     if (operation === 'resume_worker') {
       if (args.confirmClosed !== true) fail('Resume requires explicit user confirmation that the previous worker session is closed (confirmClosed:true). Disconnected alone is not proof of closure.');
       if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
+      const relative = await directory(this.store.root, target.projectDirectory);
+      assertValid();
+      if (relative !== '.') fail('worker working directory must equal the config root; subdirectory resumes would read a forbidden parent config');
+      const cwd = path.resolve(this.store.root, relative);
+      // Directory validation is read-only; recheck admission after that await.
+      if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
+      if (this.handoff?.isClosing(target.sessionId)) fail('worker close is active or uncertain; resume is fenced');
       const fence = { inFlight: true, submitted: false, announced: false };
       this.resumeFences.set(target.sessionId, fence);
       armReminder();
@@ -461,9 +483,6 @@ export class Intercom {
         const connection = await (this.options.probe ?? probeWorker)(target, { signal: this.probeController.signal });
         assertValid();
         if (connection.state === 'connected') fail('Worker endpoint is still connected; refusing to resume the same session twice.');
-        const relative = await directory(this.store.root, target.projectDirectory);
-        assertValid();
-        const cwd = path.resolve(this.store.root, relative);
         const fresh = await this.state();
         assertValid();
         requireCoordinator(fresh.config, id);
@@ -471,7 +490,7 @@ export class Intercom {
         if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory) fail('Worker configuration changed during resume check; no launch submitted.');
         if (this.handoff?.isClosing(target.sessionId) || fencedClose(current.closeJob)) fail('worker close is active or uncertain; resume is fenced');
         fence.submitted = true;
-        const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, sessionId: current.sessionId });
+        const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, workspaceRoot: this.store.root, sessionId: current.sessionId });
         completed = true;
         return result;
       } finally {

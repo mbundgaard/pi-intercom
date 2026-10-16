@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, rename, unlink, open, link, stat } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, unlink, open, link, stat, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fencedClose, validateHandoff, validateCloseJob, type Handoff, type CloseJob } from './handoff.js';
@@ -80,24 +80,67 @@ const RENAME_BUDGET_MS = 250;
 export class ConfigStore {
   readonly file: string;
   private tail: Promise<unknown> = Promise.resolve();
+  private canonicalRoot?: string;
   constructor(readonly root: string, private readonly options: ConfigStoreOptions = {}) { this.file = path.join(root, '.pi-intercom', 'config.json'); }
+  private async assertLocalPaths(): Promise<void> {
+    const root = await realpath(this.root);
+    if (this.canonicalRoot === undefined) this.canonicalRoot = root;
+    else if (root !== this.canonicalRoot) fail('config root canonical location changed');
+    // Reject existing escaping links/junctions before following them for any
+    // config access. These path checks are best effort, not TOCTOU protection.
+    for (const [location, directory] of [[path.dirname(this.file), true], [this.file, false]] as const) {
+      try { await lstat(location); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      let resolved: string;
+      try { resolved = await realpath(location); }
+      catch { fail('local config path cannot be resolved safely'); }
+      const relative = path.relative(root, resolved);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('local config path escapes session root');
+      const metadata = await stat(resolved);
+      if (directory ? !metadata.isDirectory() : !metadata.isFile()) fail('invalid local config path type');
+    }
+  }
+  async validateRoot(expectedCanonicalRoot: string): Promise<void> {
+    await this.assertLocalPaths();
+    if (this.canonicalRoot !== expectedCanonicalRoot) fail('config root canonical location changed');
+  }
   async read(): Promise<Config> {
-    // Missing, malformed and unreadable files propagate; never overwrite them.
+    // Missing, malformed and unreadable local files propagate; no fallback.
+    await this.assertLocalPaths();
     return validateConfig(JSON.parse(await readFile(this.file, 'utf8')));
   }
   static async discover(cwd: string): Promise<ConfigStore | undefined> {
-    let at = path.resolve(cwd);
-    for (;;) {
-      const store = new ConfigStore(at);
-      try { await store.read(); return store; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      const parent = path.dirname(at); if (parent === at) return undefined; at = parent;
-    }
+    const store = new ConfigStore(await realpath(cwd));
+    try { await store.read(); return store; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return undefined; }
+  }
+  static async workspace(cwd: string, workspaceRoot: string): Promise<ConfigStore> {
+    text(workspaceRoot, 'workspaceRoot');
+    if (!path.isAbsolute(workspaceRoot)) fail('workspaceRoot must be absolute');
+    const root = await realpath(workspaceRoot);
+    if (!(await stat(root)).isDirectory()) fail('workspaceRoot is not a directory');
+    const current = await realpath(cwd);
+    if (path.relative(root, current) !== '') fail('workspaceRoot must equal the session working directory; parent configs are forbidden');
+    const store = new ConfigStore(root);
+    await store.read(); // Explicit worker mode must never create a replacement coordinator.
+    return store;
   }
   protected openTemporary(file: string) { return open(file, 'wx'); }
+  private async cleanupTemporary(temp: string): Promise<void> {
+    // A moved root may leave an unpublished temp behind. Never follow a
+    // replacement parent outside the pinned root just to clean up. This guard
+    // is independent of lifecycle/deadline expiry so ordinary failures clean up.
+    await this.assertLocalPaths();
+    const resolved = await realpath(temp);
+    const relative = path.relative(this.canonicalRoot!, resolved);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail('temporary config path escapes session root');
+    await unlink(temp);
+  }
   private async temporary(config: Config): Promise<string> {
     validateConfig(config);
+    await this.assertLocalPaths();
     await mkdir(path.dirname(this.file), { recursive: true });
+    await this.assertLocalPaths();
     const temp = `${this.file}.${randomUUID()}.tmp`;
     const handle = await this.openTemporary(temp);
     try {
@@ -108,7 +151,7 @@ export class ConfigStore {
     } catch (error) {
       // Cleanup failures must not replace the original write/sync/close error.
       await handle.close().catch(() => {});
-      await unlink(temp).catch(() => {});
+      await this.cleanupTemporary(temp).catch(() => {});
       throw error;
     }
   }
@@ -118,14 +161,14 @@ export class ConfigStore {
     assertValid();
     const temp = await this.temporary({ version: 1, multiplexer: 'herdr', agents: [{ sessionId: id, name: 'Coordinator', coordinator: true, description: DEFAULT_DESCRIPTION, port: boundPort, projectDirectory: '.' }] });
     try {
-      assertValid();
+      await this.assertLocalPaths(); assertValid();
       try { await link(temp, this.file); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-        await this.read(); await unlink(temp); return false;
+        await this.read(); await this.cleanupTemporary(temp); return false;
       }
-      await unlink(temp); return true;
-    } catch (error) { await unlink(temp).catch(() => {}); throw error; }
+      await this.cleanupTemporary(temp); return true;
+    } catch (error) { await this.cleanupTemporary(temp).catch(() => {}); throw error; }
   }
   private async publish(temp: string, assertValid: () => void): Promise<void> {
     const replace = this.options.rename ?? rename;
@@ -138,7 +181,7 @@ export class ConfigStore {
       // of this already synced/closed temp, never the mutation or any OS action
       // outside config persistence. The elapsed budget bounds retry initiation,
       // not the duration of an already-submitted OS rename.
-      assertValid();
+      await this.assertLocalPaths(); assertValid();
       if (attempt > 0 && now() - started >= RENAME_BUDGET_MS) throw originalError;
       try { await replace(temp, this.file); return; }
       catch (error) {
@@ -160,7 +203,7 @@ export class ConfigStore {
         // Every publication attempt checks the lifecycle/deadline guard; an
         // already submitted OS rename still cannot be undone.
         await this.publish(temp, assertValid);
-      } catch (error) { await unlink(temp).catch(() => {}); throw error; }
+      } catch (error) { await this.cleanupTemporary(temp).catch(() => {}); throw error; }
       return c;
     });
     this.tail = operation.catch(() => {}); return operation;

@@ -12,7 +12,7 @@
   "bugs": {
     "url": "https://github.com/mbundgaard/pi-intercom/issues"
   },
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A coordinator-led workspace for Pi. Delegate to workers with separate contexts, evaluate their reports, and keep the main conversation focused—with the team visible alongside it.",
   "type": "module",
   "keywords": [
@@ -49,7 +49,7 @@
     "build": "node -e \"require('node:fs').rmSync('dist', {recursive:true, force:true})\" && tsc",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test tests/core.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/linux-launcher.test.mjs tests/activity.test.mjs tests/reports.test.mjs tests/worker-status.test.mjs tests/connections.test.mjs tests/reminders.test.mjs tests/handoff.test.mjs tests/pane-close.test.mjs tests/version.test.mjs tests/monitor.test.mjs tests/monitor-view.test.mjs tests/monitor-launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/snapshot.test.mjs tests/snapshot-security.test.mjs tests/observability-integration.test.mjs",
+    "test": "npm run build && node --test tests/core.test.mjs tests/root-isolation.test.mjs tests/integration.test.mjs tests/launcher.test.mjs tests/linux-launcher.test.mjs tests/activity.test.mjs tests/reports.test.mjs tests/worker-status.test.mjs tests/connections.test.mjs tests/reminders.test.mjs tests/handoff.test.mjs tests/pane-close.test.mjs tests/version.test.mjs tests/monitor.test.mjs tests/monitor-view.test.mjs tests/monitor-launcher.test.mjs tests/extension.test.mjs tests/runtime-http.test.mjs tests/resume-storage.test.mjs tests/observability.test.mjs tests/snapshot.test.mjs tests/snapshot-security.test.mjs tests/observability-integration.test.mjs",
     "test:host": "node --test tests/pi-cancellation-probe.test.mjs",
     "test:package": "node --test tests/packaged-monitor.test.mjs",
     "check:package": "npm run build && npm pack --dry-run --ignore-scripts && npm run test:package"

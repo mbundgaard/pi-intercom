@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
-import { mkdtemp, rm, access, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, access, writeFile, readFile } from 'node:fs/promises';
 import { Server } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -14,21 +14,13 @@ import { readObservationSnapshot } from '../dist/snapshot.js';
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-adapter-'));
-  // Isolate this fixture from real ancestor Intercom projects. Production discovery
-  // policy is tested separately; adapter startup must never contact an ancestor host.
-  const originalDiscover = ConfigStore.discover;
-  ConfigStore.discover = async cwd => {
-    assert.equal(path.resolve(cwd), path.resolve(root), 'adapter discovery must stay in its test root');
-    const store = new ConfigStore(root);
-    try { await store.read(); return store; }
-    catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
-  };
   const inheritedHerdr = process.env.HERDR_ENV;
   delete process.env.HERDR_ENV;
-  const tools = new Map(), events = new Map(), messages = [], notices = [], names = [], widgets = [];
+  const tools = new Map(), events = new Map(), flags = new Map(), flagValues = new Map(), messages = [], notices = [], names = [], widgets = [];
   let id = 'adapter-coordinator', idle = true, name = '', failName = false;
   const pi = {
     registerTool: tool => tools.set(tool.name, tool), on: (event, handler) => events.set(event, handler),
+    registerFlag: (name, options) => flags.set(name, options), getFlag: name => flagValues.get(name),
     getSessionName: () => name,
     setSessionName: value => { if (failName) throw new Error('injected name failure'); name = value; names.push(value); },
     sendUserMessage: (content, options) => messages.push({ content, options }),
@@ -40,12 +32,12 @@ async function adapter(t) {
   t.after(async () => {
     try { await events.get('session_shutdown')(); }
     finally {
-      ConfigStore.discover = originalDiscover;
       if (inheritedHerdr === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = inheritedHerdr;
       await rm(root, { recursive: true, force: true });
     }
   });
-  return { root, ctx, tools, events, messages, notices, names, widgets,
+  return { root, ctx, tools, events, flags, messages, notices, names, widgets,
+    setRootFlag: value => flagValues.set('intercom-root', value),
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
     setDelivery: deliver => { pi.sendUserMessage = deliver; },
     start: () => events.get('session_start')({}, ctx),
@@ -53,6 +45,64 @@ async function adapter(t) {
     invoke: (operation, args = {}) => tools.get(`intercom_${operation}`).execute('test', args, undefined, undefined, ctx) };
 }
 const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? 'Windows/Linux extension startup adapter' : false };
+
+test('adapter without root flag ignores ancestor config and inherited root env', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('parent-coordinator', 12345);
+  const before = await readFile(store.file, 'utf8');
+  const child = path.join(a.root, 'independent-child'); await mkdir(child);
+  const oldEnv = process.env.PI_INTERCOM_ROOT;
+  process.env.PI_INTERCOM_ROOT = a.root;
+  t.after(() => { if (oldEnv === undefined) delete process.env.PI_INTERCOM_ROOT; else process.env.PI_INTERCOM_ROOT = oldEnv; });
+  a.ctx.cwd = child; await a.start();
+  assert.equal((await new ConfigStore(child).read()).agents[0].sessionId, 'adapter-coordinator');
+  assert.equal(await readFile(store.file, 'utf8'), before);
+  assert.match((await a.prompt()).systemPrompt, /Identity: Coordinator/);
+});
+test('explicit CLI root equal to cwd survives replacement but never widens changed cwd', supportedHost, async t => {
+  const a = await adapter(t), registrations = [];
+  const coordinator = await listen(undefined, async message => { registrations.push(message); });
+  t.after(() => coordinator.close());
+  await new ConfigStore(a.root).initialize('workspace-coordinator', coordinator.port);
+  a.setRootFlag(a.root); a.setId('same-root-worker'); await a.start();
+  assert.equal(registrations[0].from, 'same-root-worker');
+  assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
+  a.setId('replacement-worker'); await a.start();
+  assert.equal(registrations.at(-1).from, 'replacement-worker');
+  const child = path.join(a.root, "worker O'Brien"); await mkdir(child);
+  a.ctx.cwd = child; await a.start();
+  await assert.rejects(a.invoke('list'), /not initialized/);
+  assert.ok(a.notices.some(notice => notice.level === 'error'));
+  await assert.rejects(access(path.join(child, '.pi-intercom')), /ENOENT/);
+});
+test('explicit parent root rejects before reading valid parent config or creating resources', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('parent-coordinator', 12345);
+  const before = await readFile(store.file, 'utf8');
+  const child = path.join(a.root, 'child'); await mkdir(child);
+  a.ctx.cwd = child; a.setRootFlag(a.root);
+  const originalRead = ConfigStore.prototype.read, originalListen = Server.prototype.listen;
+  let reads = 0, listens = 0;
+  ConfigStore.prototype.read = async function() { reads++; return originalRead.call(this); };
+  Server.prototype.listen = function() { listens++; assert.fail('no listener for parent root'); };
+  try { await a.start(); }
+  finally { ConfigStore.prototype.read = originalRead; Server.prototype.listen = originalListen; }
+  assert.equal(reads, 0); assert.equal(listens, 0);
+  await assert.rejects(a.invoke('list'), /not initialized/);
+  assert.equal(await readFile(store.file, 'utf8'), before);
+  await assert.rejects(access(path.join(child, '.pi-intercom')), /ENOENT/);
+});
+test('empty, relative or configless explicit roots never fall back or start a listener', supportedHost, async t => {
+  const a = await adapter(t), originalListen = Server.prototype.listen;
+  Server.prototype.listen = function() { assert.fail('invalid root must fail before listening'); };
+  try {
+    for (const root of ['', '.', a.root]) {
+      a.setRootFlag(root); await a.start();
+      await assert.rejects(a.invoke('list'), /not initialized/);
+      await assert.rejects(access(path.join(a.root, '.pi-intercom')), /ENOENT/);
+    }
+  } finally { Server.prototype.listen = originalListen; }
+});
 
 test('empty roster skips monitor; first registered worker requests it without probing liveness', supportedHost, async t => {
   const a = await adapter(t); await a.start();
@@ -116,8 +166,11 @@ test('handoff settlement observes only persisted successful tool IDs and new inp
 });
 
 test('single extension registers all agreed tools without starting resources in factory', async () => {
-  const tools = new Map(), events = new Map();
-  extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler) });
+  const tools = new Map(), events = new Map(), flags = new Map();
+  extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler),
+    registerFlag: (name, options) => flags.set(name, options), getFlag: () => assert.fail('flags resolve only during session_start') });
+  assert.equal(flags.get('intercom-root').type, 'string');
+  assert.equal(flags.get('intercom-root').default, undefined);
   assert.equal(tools.size, 16);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');

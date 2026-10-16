@@ -33,7 +33,7 @@ The original proposal remains in `multi-agent-development-architecture.md`. Wher
 
 - Use a single shared configuration file at `<coordinator-root>/.pi-intercom/config.json`.
 - The coordinator always writes to this fixed location anchored to its project root.
-- Workers discover the same file by searching upward from their working directory.
+- Root-isolation revision (0.8.0): all sessions read config only in their starting working directory. An explicit `--intercom-root` must canonically equal that directory; even explicit parent roots are forbidden before config access.
 - The file must be suitable for checking into source control; session IDs and ports remain in this shared file, rather than being moved into a separate runtime configuration.
 - Workers only read the configuration. The coordinator reads and writes it.
 - Worker registration and port changes are reported to the coordinator, which performs the writes.
@@ -44,7 +44,7 @@ The original proposal remains in `multi-agent-development-architecture.md`. Wher
 - Configuration records session ID, name, coordinator flag, port, and a brief responsibility description.
 - The configured multiplexer is also stored in this file.
 - Each worker entry stores its project directory relative to the coordinator root. Creation and resume use this directory as the worker's working directory.
-- In V1, worker directories must be the coordinator root or its descendants, so upward configuration discovery works without passing a config path.
+- Shared-roster worker create/resume requires the coordinator root itself. Descendant directory registrations/history are retained, but launching them against a parent config is rejected without silently changing cwd. The explicit root flag is a same-directory assertion, validated before startup resources.
 - Invalid or unreadable configuration produces a clear error and is left untouched. Do not treat it as absent or overwrite it with new coordinator configuration. Only a genuinely absent config triggers initial coordinator creation.
 - Exact JSON schema and additional fields remain open.
 
@@ -62,7 +62,7 @@ Illustrative entry, not a finalized schema:
 
 ### Initial coordinator startup
 
-- If no configuration is found, the extension automatically becomes coordinator and creates the configuration at its current project root.
+- Without an explicit workspace root, if the exact local config is absent, the extension becomes coordinator and creates it at the current project root. Explicit workspace mode requires an existing config and never falls back to creating a replacement coordinator.
 - The initial coordinator root is Pi's current working directory. Do not attempt repository or solution root detection.
 - Use default coordinator metadata:
   - Name: `Coordinator`
@@ -75,7 +75,7 @@ Illustrative entry, not a finalized schema:
 ### New worker registration
 
 1. Coordinator launches a new Pi session with the same extension loaded.
-2. Worker discovers the shared configuration. Its session ID has no entry yet, but a coordinator is configured.
+2. Worker verifies the explicitly supplied root equals its cwd and reads only that directory's configuration. Its session ID has no entry yet, but a coordinator is configured.
 3. Worker starts its local endpoint and reports its own Pi session ID, bound port, and project directory to the coordinator. The coordinator stores the project directory relative to its root; no launch-to-registration matching is required.
 4. Worker waits anonymously; registration is not permission to start work. Do not create an unnamed placeholder config entry. Reported connection details are available to the coordinator for configuration.
 5. Coordinator agent explicitly calls `intercom_configure_worker` to create the worker entry with name and responsibility, using the reported session ID, port, and project directory.
@@ -84,7 +84,7 @@ Illustrative entry, not a finalized schema:
 
 - When shared configuration exists, any session ID absent from it follows the normal new-worker flow: register and wait for configuration and assignment. This applies to forks as well; do not inherit authority or responsibility from the source session.
 - No separate instance ID is passed to workers.
-- No worker-specific config path or coordinator callback address needs to be passed: the config has a fixed discovery location and contains the coordinator endpoint.
+- No worker-specific config file path or coordinator callback address is passed. The launcher supplies an explicit root equal to child cwd; the local config contains the coordinator endpoint. This never grants access to a parent config.
 - Workers start unassigned: no name or responsibility. After registration, the coordinator assigns these by session ID in the config and tells the worker to reread it. Do not require sequential launches merely to match preassigned roles to registrations.
 - When a worker reads its configuration, synchronize its Pi session name and, when hosted in Herdr, its tab name with its configured worker name. Automatically fix either mismatch.
 - The means of loading the extension in a launched process must be deterministic; Pi's explicit extension loading is a candidate, not an instruction for the worker model to improvise setup.
