@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ConfigStore, directory, named, validateConfig } from '../dist/config.js';
@@ -23,7 +23,7 @@ test('exact-root discovery, explicit same-root validation and invalid config pre
   const child = path.join(s.root, 'a', 'b'); await mkdir(child, { recursive: true });
   assert.equal(await ConfigStore.discover(child), undefined);
   await assert.rejects(ConfigStore.workspace(child, s.root), /must equal/);
-  assert.equal((await ConfigStore.workspace(s.root, s.root)).root, s.root);
+  assert.equal((await ConfigStore.workspace(s.root, s.root)).root, await realpath(s.root));
   assert.equal(await directory(s.root, child), 'a/b');
   await assert.rejects(directory(s.root, '..'), /descendant/);
   await writeFile(s.file, '{broken');
