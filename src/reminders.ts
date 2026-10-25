@@ -1,5 +1,40 @@
+/** Operator override for the coordinator reminder interval, in whole minutes. Process environment only; never stored or echoed. */
+const REMINDER_MINUTES_ENV = 'PI_INTERCOM_REMINDER_MINUTES';
+const MIN_REMINDER_MINUTES = 1;
+/** floor(2147483647 / 60000): 35791 * 60000 = 2147460000 stays inside Node's signed 32-bit timeout ceiling, while 35792 * 60000 = 2147520000 overflows it to a near-immediate tick. */
+const MAX_REMINDER_MINUTES = 35791;
 export const REMINDER_INTERVAL_MS = 5 * 60 * 1000;
-export const REMINDER_TEXT = 'Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.\n\nIf there is genuinely nothing to follow up on, call intercom_stop_reminders. Otherwise, reminders continue every five minutes; a new worker call resets the timer.\n\nThis reminder does not authorize new work, retries, worker closure, or publication.';
+/** Fixed operator diagnostic for unusable nonblank input. It never contains the supplied value. */
+export const REMINDER_INVALID_INPUT_WARNING = `${REMINDER_MINUTES_ENV} is invalid; using the 5-minute default`;
+
+export interface ReminderInterval {
+  intervalMs: number;
+  /** True only for explicit nonblank unusable input; missing or blank input stays quiet. */
+  invalidInput: boolean;
+}
+
+/**
+ * Trimmed ASCII decimal whole minutes, leading zeros allowed, 1-35791 inclusive.
+ * Unset or blank returns the default without the marker; zero, signs, fractions,
+ * exponents, nondecimal forms, suffixes, non-ASCII digits and unsafe or
+ * out-of-range values return the default with it. No throw, clamp or disable, no
+ * raw value in the result, and no notification side effect in this parser.
+ */
+export function parseReminderInterval(raw: string | undefined): ReminderInterval {
+  const trimmed = raw?.trim() ?? '';
+  if (!trimmed) return { intervalMs: REMINDER_INTERVAL_MS, invalidInput: false };
+  const digits = /^[0-9]+$/.test(trimmed);
+  const minutes = digits ? Number(trimmed) : NaN;
+  if (!digits || !Number.isSafeInteger(minutes) || minutes < MIN_REMINDER_MINUTES || minutes > MAX_REMINDER_MINUTES) {
+    return { intervalMs: REMINDER_INTERVAL_MS, invalidInput: true };
+  }
+  return { intervalMs: minutes * 60 * 1000, invalidInput: false };
+}
+
+/** Production environment read. Callers snapshot once per runtime start and never reread while that runtime runs. */
+export function readReminderMinutesEnv(): string | undefined { return process.env[REMINDER_MINUTES_ENV]; }
+
+export const REMINDER_TEXT = 'Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.\n\nIf there is genuinely nothing to follow up on, call intercom_stop_reminders. Otherwise, reminders continue at the configured interval; a new worker call resets the timer.\n\nThis reminder does not authorize new work, retries, worker closure, or publication.';
 
 export interface ReminderClock {
   schedule(callback: () => void, milliseconds: number): () => void;
@@ -24,7 +59,8 @@ export class CoordinatorReminders {
   private disposed = false;
   private cancel?: () => void;
   private detachOwner?: () => void;
-  constructor(private readonly host: ReminderHost, private readonly timer: ReminderClock = clock) {}
+  /** intervalMs comes from a validated start-local snapshot; the scheduler receives milliseconds only and never revalidates operator input. */
+  constructor(private readonly host: ReminderHost, private readonly timer: ReminderClock = clock, private readonly intervalMs: number = REMINDER_INTERVAL_MS) {}
   arm(signal?: AbortSignal): void {
     if (this.disposed || signal?.aborted) return;
     this.stop();
@@ -64,6 +100,6 @@ export class CoordinatorReminders {
         } catch { /* Unknown role/read/delivery outcome: no blind immediate replay. */ }
         finally { this.checking = false; }
       })();
-    }, REMINDER_INTERVAL_MS);
+    }, this.intervalMs);
   }
 }

@@ -9,7 +9,7 @@ import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
-import { CoordinatorReminders, type ReminderClock } from './reminders.js';
+import { CoordinatorReminders, parseReminderInterval, readReminderMinutesEnv, REMINDER_INVALID_INPUT_WARNING, type ReminderClock } from './reminders.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
 export interface Host {
@@ -32,6 +32,8 @@ export interface RuntimeOptions {
   /** Test seam; production defaults to 120 seconds, values above that are capped. */
   closeTimeoutMs?: number;
   reminderClock?: ReminderClock;
+  /** Test seam for the operator environment. Production reads process.env once per runtime start. */
+  reminderMinutesEnv?: () => string | undefined;
   /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
   workspaceRoot?: string;
 }
@@ -88,6 +90,10 @@ export class Intercom {
     const generation = ++this.generation, assertValid = this.validity();
     let record = this.captureObserver();
     try {
+      // One start-local snapshot of the operator interval: construction, resets,
+      // stop/rearm and config-only reload never reread; a fresh runtime does.
+      // Only validated milliseconds reach the timer, never the raw value.
+      const reminderInterval = parseReminderInterval((this.options.reminderMinutesEnv ?? readReminderMinutesEnv)());
       const discovered = this.options.workspaceRoot !== undefined
         ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
         : await ConfigStore.discover(this.host.cwd);
@@ -121,7 +127,7 @@ export class Intercom {
         isCoordinator: async () => { const fresh = await this.state(); assertValid(); return fresh.me?.coordinator === true; },
         busy: () => this.host.busy(),
         deliver: message => { assertValid(); this.host.deliver(message, false); },
-      }, this.options.reminderClock);
+      }, this.options.reminderClock, reminderInterval.intervalMs);
       this.handoff = new HandoffWorkflow({
         state: () => this.state(), assertCurrent: assertValid,
         update: async (mutate, guard) => {
@@ -138,6 +144,7 @@ export class Intercom {
         busy: () => this.host.busy(), provider: this.options.closeProvider, timeoutMs: this.options.closeTimeoutMs,
       });
       if (me?.coordinator) {
+        if (reminderInterval.invalidInput) this.warnInvalidReminderInterval(assertValid);
         await this.handoff.recover(); assertValid();
         try { this.observer?.maintain?.(); } catch { /* No cleanup failure affects readiness. */ }
         await this.store.update(this.id(), c => { requireCoordinator(c, this.id()).port = this.endpoint!.port; }, assertValid);
@@ -168,6 +175,13 @@ export class Intercom {
       }
       throw e;
     }
+  }
+  /** Best-effort, value-free coordinator startup diagnostic: at most one attempt per runtime start. */
+  private warnInvalidReminderInterval(assertValid: () => void): void {
+    try {
+      assertValid();
+      this.host.notify(REMINDER_INVALID_INPUT_WARNING);
+    } catch { /* A replaced lifecycle or failed notification never fails startup, retries, logs input/error detail or arms a timer. */ }
   }
   async close(): Promise<void> {
     if (this.closing) return this.closing;
