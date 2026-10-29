@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8');
-const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+// Git may check out workflow YAML with CRLF on Windows; semantics are identical.
+const workflow = (await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+const ci = (await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
 
 test('publication is tag-push only, with no release/manual/branch trigger', () => {
   assert.match(ci, /npm audit --audit-level=low/);
