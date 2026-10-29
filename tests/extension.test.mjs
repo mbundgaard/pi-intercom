@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
+import { AgentSession } from '@earendil-works/pi-coding-agent';
 import { mkdtemp, mkdir, rm, access, writeFile, readFile } from 'node:fs/promises';
 import { Server } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -165,6 +166,49 @@ test('handoff settlement observes only persisted successful tool IDs and new inp
   assert.equal(invalidations,2); assert.deepEqual(ids,['saved']);
 });
 
+test('SDK blocks nested handoff execution while top-level persisted-result proof remains valid', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  const definition = a.tools.get('intercom_report_handoff');
+  assert.equal(definition.exposure, 'model-only');
+  for (const [name, tool] of a.tools) if (name !== definition.name) assert.equal(tool.exposure, 'direct');
+  const originalTool = Intercom.prototype.tool, originalSettled = Intercom.prototype.workerSettled;
+  let executions = 0, settledIds;
+  Intercom.prototype.tool = async function(operation, _args, id) {
+    executions++; assert.equal(operation, 'report_handoff'); assert.equal(id, 'top-level-handoff');
+    return { saved: true, closure: 'awaiting_turn_settlement' };
+  };
+  Intercom.prototype.workerSettled = function(ids) { settledIds = [...ids]; };
+  t.after(() => { Intercom.prototype.tool = originalTool; Intercom.prototype.workerSettled = originalSettled; });
+  // Use the installed SDK's callable filter AND execution pipeline, not a copied
+  // exposure rule: even a caller that knows the hidden name cannot invoke it.
+  const sdk = AgentSession.prototype;
+  assert.equal(typeof sdk._getCallableTools, 'function');
+  assert.equal(typeof sdk._executeNestedToolCall, 'function');
+  const host = {
+    _toolDefinitions: new Map([...a.tools].map(([name, tool]) => [name, { definition: tool }])),
+    _toolRegistry: new Map([...a.tools].map(([name, tool]) => [name, { ...tool,
+      execute: (id, args, signal, update) => tool.execute(id, args, signal, update, a.ctx),
+    }])),
+    getActiveToolNames: () => [...a.tools.keys()],
+    _getToolExposure: sdk._getToolExposure,
+    _getCallableTools: sdk._getCallableTools,
+    _findLastAssistantMessage: () => ({ role: 'assistant', content: [] }),
+    agent: { toolExecution: 'parallel', state: { messages: [], tools: [] } },
+    _extensionRunner: { emit: async () => {} }, _emit: () => {},
+  };
+  assert.ok(!host._getCallableTools().some(tool => tool.name === definition.name));
+  assert.ok(host._getCallableTools().some(tool => tool.name === 'intercom_worker_status'));
+  const result = await sdk._executeNestedToolCall.call(host, 'parent', definition.name, { jobId: 'job', summary: 'Public handoff' }, {});
+  assert.equal(result.isError, true);
+  assert.match(result.result.content[0].text, /not found/);
+  assert.equal(executions, 0, 'nested invocation must not enter Intercom or save a handoff');
+  await definition.execute('top-level-handoff', { jobId: 'job', summary: 'Public handoff' }, undefined, undefined, a.ctx);
+  assert.equal(executions, 1);
+  a.ctx.sessionManager.getBranch = () => [{ type: 'message', message: { role: 'toolResult', toolCallId: 'top-level-handoff', isError: false } }];
+  await a.events.get('agent_settled')({}, a.ctx);
+  assert.deepEqual(settledIds, ['top-level-handoff']);
+});
+
 test('single extension registers all agreed tools without starting resources in factory', async () => {
   const tools = new Map(), events = new Map(), flags = new Map();
   extension({ registerTool: t => tools.set(t.name, t), on: (name, handler) => events.set(name, handler),
@@ -247,7 +291,10 @@ test('adapter always supplies steering: installed host keeps idle normal and han
   const hostSource = await readFile(fileURLToPath(new URL('./core/agent-session.js', import.meta.resolve('@earendil-works/pi-coding-agent'))), 'utf8');
   assert.match(hostSource, /streamingBehavior: options\?\.deliverAs/);
   const start = hostSource.indexOf('// If streaming, queue via steer()');
-  const end = hostSource.indexOf('// Flush any pending bash', start);
+  // Pi1.4 validates the model directly after the unchanged queue branch;
+  //0.84 flushed pending bash first. Accept only these known boundary markers.
+  const boundaries = ['// Flush any pending bash', '// Validate model'].map(marker => hostSource.indexOf(marker, start)).filter(index => index > start);
+  const end = boundaries.length ? Math.min(...boundaries) : -1;
   assert.ok(start >= 0 && end > start, 'installed prompt streaming branch must remain identifiable');
   const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
   const accept = new AsyncFunction('options', 'expandedText', 'currentImages',

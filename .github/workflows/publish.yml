@@ -1,9 +1,11 @@
 name: Publish npm package
 
+# Broad tag filter; verify-release.mjs rejects anything except canonical stable vX.Y.Z.
+# Branch pushes, GitHub Releases and manual dispatch never publish.
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -14,48 +16,124 @@ concurrency:
 
 jobs:
   validate:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
+      - name: Verify stable tag, exact checkout and manifest versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node scripts/verify-release.mjs
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_REF}^{commit}")"
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm audit --audit-level=low
       - run: npm run check:package
+      - name: Require unchanged tracked release sources
+        run: git diff --exit-code HEAD --
 
   publish:
     needs: validate
+    if: github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      # Do not create a token-based npmrc. npm obtains publishing credentials via OIDC.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: https://registry.npmjs.org
-      - name: Install npm with trusted publishing support
+      - name: Install npm with Trusted Publishing support
         run: npm install --global npm@11
-      - name: Verify package and release version
+      - name: Verify stable tag, exact checkout and manifest versions
+        id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          version=$(node scripts/verify-release.mjs)
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${GITHUB_REF}^{commit}")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          node --version
+          npm --version
+      - run: npm ci
+      - run: npm audit --audit-level=low
+      - run: npm run check:package
+      - name: Require unchanged tracked release sources
+        run: git diff --exit-code HEAD --
+      - name: Pack and hash the exact publication artifact
+        id: pack
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/intercom-release"
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP/intercom-release" > "$RUNNER_TEMP/intercom-release/pack.json"
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
-          const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          if (p.name !== '@comput/pi-intercom') throw new Error('Unexpected package name');
-          if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== `v${p.version}`) {
-            throw new Error('Release tag must match package.json version');
-          }
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          const dir = path.join(process.env.RUNNER_TEMP, 'intercom-release');
+          const raw = JSON.parse(fs.readFileSync(path.join(dir, 'pack.json'), 'utf8'));
+          const entries = Array.isArray(raw) ? raw : Object.values(raw);
+          const p = entries[0], version = process.env.RELEASE_VERSION;
+          if (entries.length !== 1 || p.name !== '@comput/pi-intercom' || p.version !== version || p.filename !== `comput-pi-intercom-${version}.tgz`) throw new Error('Unexpected packed artifact');
+          const archive = path.join(dir, p.filename);
+          const bytes = fs.readFileSync(archive);
+          const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`;
+          if (p.integrity !== integrity || p.shasum !== createHash('sha1').update(bytes).digest('hex')) throw new Error('Packed artifact integrity mismatch');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `archive=${archive}\n`);
+          console.log(`Prepared @comput/pi-intercom@${version}; ${integrity}`);
           NODE
-      - run: npm ci
-      - run: npm run build
-      - name: Publish with OIDC provenance
-        run: npm publish --access public --provenance --ignore-scripts
+      - name: Preserve the exact release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-${{ github.ref_name }}
+          path: ${{ runner.temp }}/intercom-release/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish exact artifact with OIDC and provenance
+        id: publish
+        env:
+          RELEASE_ARCHIVE: ${{ steps.pack.outputs.archive }}
+        run: npm publish "$RELEASE_ARCHIVE" --registry=https://registry.npmjs.org --access public --provenance --ignore-scripts --fetch-retries=0
+      - name: Verify registry artifact and provenance linkage (read-only)
+        env:
+          RELEASE_ARCHIVE: ${{ steps.pack.outputs.archive }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          RELEASE_WORKFLOW: .github/workflows/publish.yml
+        run: >-
+          node scripts/verify-published.mjs
+          --archive "$RELEASE_ARCHIVE"
+          --version "$RELEASE_VERSION"
+          --commit "$RELEASE_COMMIT"
+          --repo "$GITHUB_REPOSITORY"
+          --workflow "$RELEASE_WORKFLOW"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Do not replay a possibly published release
+        if: failure() && (steps.publish.outcome == 'success' || steps.publish.outcome == 'failure')
+        run: echo 'Publication was attempted; its outcome or verification may be incomplete. Inspect this run and the registry; do not rerun publication, move the tag or reuse the version blindly.'
