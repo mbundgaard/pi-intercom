@@ -315,6 +315,7 @@ Run these commands from a source checkout; tests and workflows are not shipped i
 npm ci
 npm run typecheck
 npm test
+npm audit --audit-level=low
 npm run check:package
 # Optional installed-host compatibility probe (confirms the known defect):
 PI_INTERCOM_PI_ROOT='C:/path/to/pi-coding-agent' npm run test:host
@@ -324,11 +325,23 @@ The extension source runs through Pi's TypeScript loader; `npm run build` genera
 
 ## Publishing
 
-[`.github/workflows/publish.yml`](https://github.com/comput-sh/pi-intercom/blob/main/.github/workflows/publish.yml) publishes through npm Trusted Publishing (GitHub OIDC), without an npm token secret. Configure the npm trusted publisher as owner `comput-sh`, repository `pi-intercom`, workflow `publish.yml`, with no environment.
+[`.github/workflows/publish.yml`](https://github.com/mbundgaard/pi-intercom/blob/main/.github/workflows/publish.yml) publishes **only on pushed version tags**. Ordinary commits, GitHub Release publication and manual dispatch do not publish. It checks out the triggering SHA, requires an annotated stable `vX.Y.Z` tag, and verifies the tag matches the package version and both lockfile version fields before installing dependencies.
 
-The workflow validates on Windows and Linux, then publishes with provenance from a GitHub-hosted Ubuntu runner. It runs when a GitHub release is published or when manually dispatched. Release tags must be `v<package.json version>`.
+Windows/Linux validation includes a clean install, typecheck, tests, full-tree security audit and package checks. The publisher packs and preserves an exact archive, publishes it with npm Trusted Publishing/OIDC and provenance (no stored npm token), then verifies the registry archive and decoded provenance linkage. Configure/check npm's trusted publisher as owner `mbundgaard`, repository `pi-intercom`, workflow `publish.yml`, no environment, with direct `npm publish` allowed.
 
-Published versions are immutable. For a new release, bump package and lockfile versions, commit/push, then publish a matching GitHub release. Manual dispatch publishes the selected ref and is **not a dry run**; the release-tag check only applies when a release tag is present. Do not dispatch publishing for an already published version. CI validates pushes to `main` and pull requests separately without publishing.
+Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
+
+The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.8.1 Tag-only releases and dependency security updates
+
+- Publish only from pushed, annotated stable version tags, with exact-commit and package/lockfile version checks. GitHub Release and manual-dispatch publication triggers are removed.
+- Add full-tree security audit gates to main/PR CI and release validation.
+- Upgrade the development SDK to Pi 1.4.0 with a scoped `undici` 8.12.2 override and patched `brace-expansion` 5.0.12. Verify actual installed dependency versions as well as a clean audit; Pi 0.84.4's shrinkwrap prevented effective overrides. The runtime TUI alias stays at 0.84.4 and the Node minimum remains 22.19.0. This does not upgrade users' installed Pi.
+- Keep handoff reporting model-only on newer SDKs: nested calls lack the transcript tool-result evidence required for closure. Existing final-settlement and persistence checks remain unchanged.
+- Preserve and publish one archive using npm Trusted Publishing/OIDC, then compare the registry download and decoded provenance linkage against the release build.
+- Document explicit release authorization, immutable tags, uncertain-publication handling, and installation/reload separation in [the release procedure](references/releasing.md).
+- Includes the coordinator reminders and strict session-root isolation from the preserved, unpublished 0.7.0/0.8.0 tags. Shared-roster subfolder worker launches are refused rather than redirected to parent configuration.
 
 ### 0.8.0 Strict session-root isolation
 

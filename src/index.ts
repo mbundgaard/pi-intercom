@@ -194,6 +194,10 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   for (const [operation, description, parameters] of tools) {
     pi.registerTool({
       name: `intercom_${operation}`, label: `Intercom ${operation}`, description, parameters,
+      // Handoff readiness requires this call's successful transcript tool result.
+      // Pi1.x enforces model-only for nested calls;0.84 ignores this optional field
+      // and has no nested-tool API. Never substitute a parent result as proof.
+      exposure: operation === 'report_handoff' ? 'model-only' : 'direct',
       async execute(_id, args, signal, _update, ctx) {
         signal?.throwIfAborted(); context = ctx;
         if (!runtime) throw new Error('PiIntercom not initialized; inspect startup error.');

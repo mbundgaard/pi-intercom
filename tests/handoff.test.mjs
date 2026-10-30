@@ -44,7 +44,7 @@ async function fixture(t, options = {}) {
     send: async (port, message) => { wire.push(message); if (options.intercept) await options.intercept(message); await send(port, message); },
   };
   const host = id => ({ cwd: root, sessionId: () => id, busy: () => id === 'w' && busy,
-    deliver: text => deliveries.push({ id, text }), setName: async () => {}, notify() {} });
+    deliver: text => { deliveries.push({ id, text }); options.onDelivery?.({ id, text }); }, setName: async () => {}, notify() {} });
   const c = new Intercom(host('c'), shared), w = new Intercom(host('w'), shared);
   t.after(async () => { await w.close(); await c.close(); await rm(root, { recursive: true, force: true }); });
   await c.start();
@@ -198,11 +198,23 @@ test('new turn before commit ACK rejects closure', async t => {
   assert.equal((await f.entry()).closeJob.reason, 'commit_rejected'); assert.equal(f.closes.length, 0);
 });
 
-test('deadline never forces close; coordinator reload interrupts pending jobs without replay', async t => {
-  const f = await fixture(t, { timeout: 120 }); const job = await f.request(); await f.prepared();
+test('deadline never forces close; coordinator reload interrupts pending jobs without replay', { timeout: 10000 }, async t => {
+  let delivered;
+  const prepared = new Promise(resolve => { delivered = resolve; });
+  const f = await fixture(t, { timeout: 120, onDelivery: ({ id, text }) => {
+    if (id === 'w' && text.includes('intercom_report_handoff')) delivered();
+  } });
+  // Freeze the workflow deadline while real filesystem/network preparation runs.
+  // Advance only after the actual worker request arrives, not after a wall-clock
+  // guess; the real production timeout callback and late-report guard still run.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const job = await f.request(); await prepared;
+  assert.equal((await f.entry()).closeJob.state, 'awaiting_handoff');
+  t.mock.timers.tick(120);
   await f.waitForJob('timed_out');
   assert.equal(f.closes.length, 0);
   await assert.rejects(f.w.tool('report_handoff', { jobId: job.jobId, summary: 'too late' }, 'late-tool'));
+  t.mock.timers.reset();
   const g = await fixture(t); await g.request(); await g.prepared();
   const sent = g.wire.length;
   await g.c.close(); await g.c.start();
