@@ -12,6 +12,8 @@ function fakeClock() {
   const pending = new Map(), callbacks = [];
   return {
     pending, callbacks,
+    // Remaining delay per armed timer: a reset pushes a new full-interval due time.
+    remaining: () => [...pending.values()].map(entry => entry.due - now),
     schedule(callback, delay) {
       assert.equal(delay, 300000);
       const id = ++next; pending.set(id, { callback, due: now + delay }); callbacks.push(callback);
@@ -103,6 +105,8 @@ async function fixture(t) {
   let port = 30000, busy = false;
   const options = {
     reminderClock: clock,
+    // Pin the operator environment: these default-interval regressions must not follow an inherited value.
+    reminderMinutesEnv: () => undefined,
     listen: async (_preferred, accept) => { const p = port++; endpoints.set(p, accept); return { port: p, close: async () => { endpoints.delete(p); } }; },
     send: async (p, message) => { sent.push(message); const accept = endpoints.get(p); if (!accept) throw new Error('offline'); await accept(message); },
     launch: async () => { assert.equal(clock.pending.size, 1, 'arm before launch'); throw new Error('launch outcome uncertain'); },
@@ -243,4 +247,40 @@ test('runtime reset, busy skip, lifecycle close/restart and changed role suppres
   const state = f.c.state.bind(f.c);
   f.c.state = async () => { const value = await state(); return { ...value, me: { ...value.me, coordinator: false } }; };
   await f.tick(); assert.equal(f.reminderCount(), 1); assert.equal(f.clock.pending.size, 0);
+});
+
+test('read-only, incoming and worker operations preserve an already-armed due time', async t => {
+  const f = await fixture(t);
+  await f.c.tool('send', { to: 'Worker', message: 'arm' });
+  f.clock.advance(120000);
+  const armed = f.clock.remaining();
+  assert.deepEqual(armed, [180000], 'one armed timer remains at its original due time');
+  await f.c.tool('list', {});
+  await f.c.tool('worker_status', {});
+  await f.w.tool('send', { to: 'Coordinator', message: 'worker finding' });
+  await f.w.tool('report_work', { status: 'blocked', summary: 'Need input' });
+  await f.w.tool('report_status', {});
+  await assert.rejects(f.c.tool('send', { to: 'Worker', message: '' }));
+  assert.deepEqual(f.clock.remaining(), armed, 'non-qualifying operations never re-arm or reset the timer');
+  f.clock.advance(179999); await settle(); assert.equal(f.reminderCount(), 0);
+  f.clock.advance(1); await settled(f.c.reminders); assert.equal(f.reminderCount(), 1, 'the original due time still delivers exactly once');
+});
+
+test('replaced session identity fences both an armed timer and an in-flight role read', async t => {
+  const f = await fixture(t);
+  await f.c.tool('send', { to: 'Worker', message: 'arm' });
+  assert.equal(f.clock.pending.size, 1);
+  let release, entered, first = true;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const state = f.c.state.bind(f.c);
+  f.c.state = async () => { const value = await state(); if (first) { first = false; entered(); await gate; } return value; };
+  f.clock.advance(300000);
+  await started;
+  f.c.host.sessionId = () => 'replaced-session'; // the Pi session is replaced while the role read is in flight
+  release();
+  await settled(f.c.reminders); await settle();
+  assert.equal(f.reminderCount(), 0, 'an in-flight role read of a replaced session cannot deliver');
+  f.clock.advance(300000); await settle();
+  assert.equal(f.reminderCount(), 0, 'the armed timer of a replaced session cannot deliver either');
 });
