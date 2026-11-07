@@ -349,9 +349,9 @@ Follow the [release procedure](references/releasing.md): review → choose an un
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
 
-### 0.9.2 — stale monitor-state recovery
+### 0.9.3 — stale monitor-state recovery
 
-The v0.9.1 tag is preserved: its publication failed during provenance creation with an external transparency-log HTTP 500. This release supersedes that unpublished attempt.
+The v0.9.1 and v0.9.2 tags are preserved: their publications failed during provenance creation with external transparency-log HTTP 500 errors. This release supersedes those unpublished attempts.
 
 - Automatically retire completed obsolete monitor records instead of repeating the same startup warning.
 - Recreate a missing or finished monitor when the core confirms absence and no layout reference remains.
