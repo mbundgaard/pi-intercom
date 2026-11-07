@@ -19,7 +19,7 @@ Unix uses an explicit `HC_SOCKET`, or the documented default endpoint only if no
 
 ## Monitor and worker closure
 
-Monitor ownership is persisted separately from project configuration, with core/session/caller identities, a token, original argv and terminal creation timestamp. Open supports a top-quarter panel or separate tab without changing private focus state. Old legacy records cannot grant new-core ownership.
+Monitor ownership is persisted separately from project configuration, with core/session/caller identities, a token, original argv and terminal creation timestamp. Open supports a top-quarter panel or separate tab without changing private focus state. Old legacy records cannot grant new-core ownership. Completed records matching the session are archived under the existing lock after new-core preflight succeeds, rather than blocking every startup. No old terminal is stopped or adopted. Submitted core records are similarly retired only after a successful complete inventory proves the terminal missing or finished and its layout reference is gone. Failed queries and uncertain launch/close intents never count as absence evidence.
 
 Monitor close:
 1. Validate the owned terminal, pane, caller and complete descendant inventory.

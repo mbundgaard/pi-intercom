@@ -167,14 +167,14 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
   const scope = hash(JSON.stringify([root, options.sessionId, core]));
   const directory = path.join(root, '.pi-intercom');
   check(); await mkdir(directory, { recursive: true }); check();
-  // Same session filename/lock as legacy monitor-launcher: old records fence,
-  // never migrate into creation proof. Core ID belongs in the record, not just
-  // in a filename that could silently permit another monitor on a different core.
+  // Share the legacy lock. Completed legacy records can be retired on backend
+  // transition, never adopted as core ownership. Uncertain intents stay fenced.
   const file = path.join(directory, `monitor-${key}.json`), lock = `${file}.lock`;
   let handle;
   try { handle = await open(lock, 'wx', 0o600); await handle.close(); }
   catch { throw fail(`monitor locked; inspect ${lock}; no automatic recovery`); }
   let state: Owner | undefined;
+  let retire = false, creationAttempted = false;
   const save = async () => {
     check();
     const temporary = `${file}.${randomUUID()}.tmp`;
@@ -195,6 +195,17 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
     try { state = JSON.parse(await readFile(file, 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (state !== undefined) {
+      const legacy = state as any;
+      if (object(legacy) && legacy.version === 1 && legacy.sessionId === options.sessionId &&
+          ['submitted', 'observed', 'closed'].includes(legacy.stage) &&
+          text(legacy.workspace) && text(legacy.caller) && text(legacy.pane) &&
+          (legacy.placement === undefined || ['coordinator-tab', 'new-tab'].includes(legacy.placement))) {
+        // Backend-specific IDs cannot identify anything on this core. Preserve
+        // the old record as history, not as an active creation/ownership fence.
+        retire = true; state = undefined;
+      }
+    }
+    if (state !== undefined) {
       validateOwner(state, root, options.sessionId, core, scope);
       if (state.caller !== caller) throw fail('ownership differs from current caller');
       if (state.stage === 'closed') state = undefined;
@@ -210,6 +221,24 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
     const inventory = await call('terminal.list', { all: false, labels: { [scopeLabel]: scope } });
     if (!Array.isArray(inventory?.terminals) || inventory.terminals.some((t: any) => !text(t?.address) || t.labels?.[scopeLabel] !== scope) ||
         new Set(inventory.terminals.map((t: any) => t.address)).size !== inventory.terminals.length) throw fail('ambiguous monitor inventory');
+    if (state && inventory.terminals.length === 0) {
+      sameCaller(state, record, value);
+      const references = (node: any): boolean => node.id === state!.pane || node.content?.terminal === state!.terminal || (node.children ?? []).some(references);
+      const referenced = value.spaces.some((s: any) => s.tabs.some((t: any) => references(t.root)));
+      if (!referenced) {
+        // A complete successful inventory is absence evidence. RPC failures are
+        // not. Include finished records so a hidden live process is not lost.
+        const all = await call('terminal.list', { all: true });
+        if (!Array.isArray(all?.terminals) || all.hidden_finished !== 0 || all.terminals.length > 4096 ||
+            all.terminals.some((t: any) => !text(t?.address) || !['live', 'finished'].includes(t.state)) ||
+            new Set(all.terminals.map((t: any) => t.address)).size !== all.terminals.length) throw fail('ambiguous complete monitor inventory');
+        const old = all.terminals.find((t: any) => t.address === state!.terminal);
+        if (old && (old.state !== 'finished' || old.created_ms !== state.created)) throw fail('monitor still exists or identity changed');
+        if (all.terminals.some((t: any) => t.state === 'live' && t.labels?.[scopeLabel] === scope)) throw fail('monitor inventory changed');
+        await sameCore();
+        retire = true; state = undefined;
+      }
+    }
     if (state) {
       if (inventory.terminals.length !== 1 || inventory.terminals[0].address !== state.terminal) throw fail('owned monitor inventory missing or ambiguous; no duplicate');
       sameCaller(state, record, value);
@@ -223,6 +252,11 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
     if (at.space.tabs.some((t: any) => t.name === title || hasMarker(t.root))) throw fail('unowned monitor layout marker exists in caller space');
     if (options.placement === 'coordinator-tab' && (at.tab.root.hidden === true || at.tab.root.min != null || at.tab.root.max != null || at.tab.root.size != null)) throw fail('constrained caller root cannot guarantee quarter-height placement');
     await access(options.script); await access(node); check();
+    if (retire) {
+      await sameCore(); check();
+      await rename(file, `${file}.retired-${randomUUID()}`);
+      check();
+    }
     state = {
       version: 2, backend: 'herdr-core', root, sessionId: options.sessionId, core, caller, callerCreated: record.created_ms,
       space: at.space.id, callerTab: at.tab.id, callerPane: at.pane.id, placement: options.placement!, scope, token: uuid(),
@@ -237,6 +271,7 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
     const before = await call('doc.get', { name: 'herdr-app' });
     sameCaller(state, await call('terminal.get', { terminal: caller }), layout(before));
     if (!isDeepStrictEqual(before, snapshot)) throw fail('layout changed before launch; no automatic retry');
+    creationAttempted = true;
     const created = await call('terminal.run', {
       argv: state.argv, cwd: root, caller, parent: caller, outlive_parent: true,
       no_notify: true, keep: false, rm: false, wait: false,
@@ -269,7 +304,8 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
     state.stage = 'submitted'; await save();
     return { outcome: 'monitor attached in shared layout; readiness and remote Windows rendering not verified', pane: state.pane, terminal: state.terminal };
   } catch (error) {
-    throw fail(`${String(error)}. Terminal ${state?.terminal ?? 'unknown'} may remain; no automatic cleanup or retry.`);
+    const reason = error instanceof Error ? error.message.replace(/^Intercom core monitor: /, '') : String(error);
+    throw fail(creationAttempted ? `${reason}. Terminal ${state?.terminal ?? 'unknown'} may remain; no automatic cleanup or retry.` : reason);
   } finally { await unlink(lock).catch(() => {}); }
 }
 

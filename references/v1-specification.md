@@ -2,7 +2,7 @@
 
 This is the consolidated **target design**, authoritative over conflicting wording in the original proposal and historical discussion notes. It is not a claim that every capability is currently supported. See [README](../README.md) for current behavior, release evidence and validation limits.
 
-**Historical design versus current capability:** The original V1 targets below are not a current support matrix. `intercom_stop_worker` and graceful cancellation remain disabled; see the [cancellation blocker](implementation-blocker.md). `intercom_close_worker` now uses a separate Linux-owned-pane handoff/settlement/close workflow, not graceful shutdown. New-core compatibility and its non-atomic closure limits are documented in [Herdr migration](herdr-core-migration.md); current supported behavior is in README. Manual-compaction delivery also has a known acceptance gap: HTTP receipt does not guarantee Pi accepted the input. Unresolved contract questions are not silently approved decisions.
+**Historical design versus current capability:** The original V1 targets below are not a current support matrix. `intercom_stop_worker` and graceful cancellation remain disabled; see the [cancellation blocker](implementation-blocker.md). `intercom_close_worker` now uses a separate Linux-owned-pane handoff/settlement/close workflow, not graceful shutdown. New-core compatibility and its non-atomic closure limits are documented in [Herdr integration](herdr-core.md); current supported behavior is in README. Manual-compaction delivery also has a known acceptance gap: HTTP receipt does not guarantee Pi accepted the input. Unresolved contract questions are not silently approved decisions.
 
 ## 1. Scope and principles
 

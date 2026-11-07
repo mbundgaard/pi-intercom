@@ -55,7 +55,7 @@ async function fixture(t) {
       case 'terminal.list':
         assert.deepEqual(Object.keys(params).sort(), params.labels ? ['all', 'labels'] : ['all']);
         assert.equal(params.all, params.labels ? false : true);
-        result = { terminals: [...(f.monitor ? [f.monitor] : []), ...f.extraInventory].filter(r => params.all || r?.state !== 'finished') }; break;
+        result = { terminals: [...(f.monitor ? [f.monitor] : []), ...f.extraInventory].filter(r => params.all || r?.state !== 'finished'), hidden_finished: 0, machines: [] }; break;
       case 'doc.get': assert.deepEqual(params, { name: 'herdr-app' }); result = { version: f.version, value: f.value }; break;
       case 'terminal.run': {
         // Actual filesystem persistence is checked *inside* the mocked mutation.
@@ -141,6 +141,66 @@ test('legacy and malformed records never become new-core ownership', async t => 
   for (const saved of [{ version: 1, stage: 'submitted', pane: 'p9' }, { version: 2, backend: 'wrong' }, null, {}]) {
     const f = await fixture(t); await f.putLedger(saved);
     await assert.rejects(ensureCoreMonitorPane(f.options), /legacy\/unknown ownership/);
+    assert.deepEqual(f.mutations(), []);
+  }
+});
+
+test('completed legacy ownership is retired once without adoption or terminal cleanup', async t => {
+  const f = await fixture(t);
+  const old = { version: 1, sessionId: f.options.sessionId, workspace: 'w3', caller: 'w3:p1', stage: 'submitted', pane: 'w3:p8' };
+  await f.putLedger(old);
+  await ensureCoreMonitorPane(f.options);
+  const files = (await readdir(path.dirname(f.file))).filter(n => n.includes('.retired-'));
+  assert.equal(files.length, 1);
+  assert.deepEqual(JSON.parse(await readFile(path.join(path.dirname(f.file), files[0]), 'utf8')), old);
+  assert.equal((await f.ledger()).version, 2);
+  assert.deepEqual(f.mutations().map(c => c.method), ['terminal.run', 'doc.set']);
+  f.calls.length = 0; await ensureCoreMonitorPane(f.options);
+  assert.deepEqual(f.mutations(), []);
+  assert.equal((await readdir(path.dirname(f.file))).filter(n => n.includes('.retired-')).length, 1);
+});
+
+test('legacy retirement requires a usable core and does not retire uncertain legacy intents', async t => {
+  for (const mode of ['unreachable', 'pending', 'wrong-session']) {
+    const f = await fixture(t);
+    const old = { version: 1, sessionId: f.options.sessionId, workspace: 'w3', caller: 'w3:p1', stage: 'submitted', pane: 'w3:p8' };
+    if (mode === 'pending') old.stage = 'run_pending';
+    if (mode === 'wrong-session') old.sessionId = 'other';
+    await f.putLedger(old);
+    if (mode === 'unreachable') f.before = () => { throw new Error('connection refused'); };
+    await assert.rejects(ensureCoreMonitorPane(f.options), error => !error.message.includes('Terminal unknown may remain'));
+    assert.deepEqual(await f.ledger(), old);
+    assert.deepEqual(f.mutations(), []);
+  }
+});
+
+test('missing or finished monitor with no layout reference is retired and replaced once', async t => {
+  for (const mode of ['missing', 'finished']) {
+    const f = await fixture(t); await ensureCoreMonitorPane(f.options);
+    if (mode === 'missing') f.monitor = undefined;
+    else f.monitor.state = 'finished';
+    f.value = layout(); f.calls.length = 0;
+    await ensureCoreMonitorPane(f.options);
+    assert.equal((await f.ledger()).stage, 'submitted');
+    assert.deepEqual(f.mutations().map(c => c.method), ['terminal.run', 'doc.set']);
+    assert.equal((await readdir(path.dirname(f.file))).filter(n => n.includes('.retired-')).length, 1);
+  }
+});
+
+test('missing live inventory is not absence proof on query failure or when an unlabeled live terminal remains', async t => {
+  for (const mode of ['unreachable', 'live', 'incomplete']) {
+    const f = await fixture(t); await ensureCoreMonitorPane(f.options);
+    const saved = await f.ledger();
+    if (mode !== 'live') f.monitor = undefined;
+    else { f.extraInventory = [{ ...f.monitor, labels: {} }]; f.monitor = undefined; }
+    f.value = layout(); f.calls.length = 0;
+    f.after = (method, params, result) => {
+      if (method === 'terminal.list' && params.labels) result.terminals = [];
+      if (mode === 'unreachable' && method === 'terminal.list' && !params.labels) throw new Error('connection lost');
+      if (mode === 'incomplete' && method === 'terminal.list' && !params.labels) result.hidden_finished = 1;
+    };
+    await assert.rejects(ensureCoreMonitorPane(f.options));
+    assert.deepEqual(await f.ledger(), saved);
     assert.deepEqual(f.mutations(), []);
   }
 });

@@ -225,7 +225,7 @@ Unix connects directly to the existing core socket without starting a server. `H
 
 Monitor open/close supports both core platforms. Close refuses observed live descendants, persists a pending fence, revalidates ownership, stops the owned monitor once and removes only its layout pane. Core termination can cascade to dependent terminals: another client concurrently attaching children is outside the non-atomic preflight guarantee. Worker handoff-close remains Linux-only, requires session-header/PID-start proof and the existing persistence/settlement/commit checks, and likewise refuses observed live descendants. Neither close promises atomic quiescence or an all-descendants guarantee. Uncertain operations are not replayed.
 
-Old monitor ownership records are not converted into new-core ownership. They require inspection before removal; Intercom will not adopt or delete an unknown pane. See [migration validation and limitations](references/herdr-core-migration.md).
+Intercom expects Herdr and its app to be up to date and aligned. Stale monitor-state recovery is automatic: completed records from the old backend are archived after current-core checks succeed, without adopting or deleting old panes. A submitted core record is also retired when a successful complete inventory confirms its terminal is missing or finished and the layout no longer references it. Connection failures, malformed records and uncertain launch/close intents retain their fences. See [Herdr integration and validation](references/herdr-core.md).
 
 ## Standalone terminal status monitor
 
@@ -348,6 +348,13 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.9.1 — stale monitor-state recovery
+
+- Automatically retire completed obsolete monitor records instead of repeating the same startup warning.
+- Recreate a missing or finished monitor when the core confirms absence and no layout reference remains.
+- Preserve safety fences for failed queries, incomplete inventories and uncertain operations.
+- Remove duplicate error prefixes and avoid suggesting a terminal was created when creation was never attempted.
 
 ### 0.9.0 — new Herdr core/app integration
 
