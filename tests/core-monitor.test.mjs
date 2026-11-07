@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { ensureCoreMonitorPane, closeCoreMonitorPane } from '../dist/core-monitor.js';
 
 const clone = structuredClone;
@@ -103,7 +103,9 @@ test('top quarter uses one CAS, retains all old content and IDs except root wrap
   assert.deepEqual(f.value, expected);
   assert.match(owner.pane, /^p[0-9a-f]{32}$/); assert.match(owner.lower, /^s[0-9a-f]{32}$/);
   const run = f.calls.find(c => c.method === 'terminal.run').params;
-  assert.deepEqual(run, { argv: [process.execPath, f.script, '--root', f.root], cwd: f.root, caller: 't1', parent: 't1', outlive_parent: true,
+  // Windows temp paths may use an 8.3 alias; launch must use the canonical root.
+  const canonicalRoot = await realpath(f.root);
+  assert.deepEqual(run, { argv: [process.execPath, f.script, '--root', canonicalRoot], cwd: canonicalRoot, caller: 't1', parent: 't1', outlive_parent: true,
     no_notify: true, keep: false, rm: false, wait: false, labels: { [scopeLabel]: owner.scope, [tokenLabel]: owner.token } });
   assert.deepEqual(f.mutations().map(c => c.method), ['terminal.run', 'doc.set']);
   assert.equal(f.calls.find(c => c.method === 'doc.set').params.version, 5);
