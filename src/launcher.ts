@@ -3,6 +3,8 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { fail } from './config.js';
 import type { LaunchRequest } from './runtime.js';
+import { renameCoreTab, withCoreSession, type CoreCall } from './herdr-core.js';
+import { preflightCoreWorkerLayout, attachCoreWorkerLayout } from './core-worker-layout.js';
 
 export type Run = (file: string, args: string[]) => Promise<string>;
 export const run: Run = async (file, args) => {
@@ -17,6 +19,7 @@ export interface LauncherOptions {
   platform?: string;
   env?: NodeJS.ProcessEnv;
   run?: Run;
+  coreCall?: CoreCall;
   sessionExists(cwd: string, id: string): Promise<boolean>;
 }
 export function launchers(options: LauncherOptions) {
@@ -35,7 +38,44 @@ export function launchers(options: LauncherOptions) {
     // Explicit per-child CLI scope cannot widen cwd or leak from a parent shell environment.
     const args = ['-e', options.extension, '--intercom-root', request.workspaceRoot, ...(request.sessionId ? ['--session', request.sessionId] : [])];
     if (request.multiplexer === 'herdr') {
-      if (env.HERDR_ENV !== '1' || !env.HERDR_WORKSPACE_ID) fail('Herdr launcher requires this Pi to run inside a Herdr-managed workspace; no fallback');
+      // HC identity takes precedence even when stale legacy variables survive.
+      // Never reinterpret an HC failure as permission to create a legacy tab.
+      if (env.HC_TERMINAL_ID !== undefined) {
+        const caller = env.HC_TERMINAL_ID;
+        if (!/^t[0-9a-z]+$/.test(caller) || caller.trim() !== caller) fail('HC launcher requires a local HC_TERMINAL_ID address; names and remote addresses are not accepted; no fallback');
+        // No template/task/message/provider override. Use an explicit shell and
+        // preserve the user's Pi defaults and literal root/session arguments.
+        const argv = platform === 'win32'
+          ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded(`$ErrorActionPreference='Stop'; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.ps1 -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`)]
+          : ['/bin/sh', '-c', `exec pi ${args.map(shQuote).join(' ')}`];
+        let attempted = false;
+        const operation = async (call: CoreCall) => {
+          // Refuse missing/unsupported app layout BEFORE creating a terminal.
+          // All reads, spawn, CAS placement and readback share this connection.
+          const ticket = await preflightCoreWorkerLayout({ caller, cwd: request.cwd, workspaceRoot: request.workspaceRoot, platform }, call);
+          attempted = true;
+          const created = await call('terminal.run', {
+            argv, cwd: request.cwd, caller, parent: caller,
+            outlive_parent: true, no_notify: true, wait: false, keep: false,
+          });
+          const placement = await attachCoreWorkerLayout(ticket, created, call);
+          return { commandSubmitted: true, ...placement, terminalState: created.state,
+            ui: 'render-unverified',
+            uiReason: 'Dedicated tab confirmed in shared app layout; remote UI rendering is not observed.',
+            piReadiness: 'not observed; terminal creation and layout confirmation are not Pi readiness', registrationAwaited: false };
+        };
+        try {
+          // Injection is a trusted test seam; production verifies hello/status
+          // for core 0.1.18 once, without reconnecting between launch steps.
+          return await (options.coreCall ? operation(options.coreCall) : withCoreSession(operation, { endpoint: env.HC_SOCKET }));
+        } catch (e) {
+          if (attempted) throw Object.assign(new Error('HC worker launch or placement failed; outcome unknown, terminal/process and app tab may remain; no automatic cleanup/retry/replacement or legacy fallback'), { outcomeUncertain: true });
+          fail(`HC launch preflight failed: ${String(e)}; no fallback or launch attempted`);
+        }
+      }
+      // Compatibility is selected only by explicit legacy identity, never by an
+      // HC error or by discovering an arbitrary running Herdr window.
+      if (env.HERDR_ENV !== '1' || !env.HERDR_WORKSPACE_ID) fail('Herdr launcher requires HC_TERMINAL_ID or explicit legacy HERDR_ENV=1 and HERDR_WORKSPACE_ID; no fallback');
       let created: { result?: { root_pane?: { pane_id?: string }; tab?: { tab_id?: string } } };
       try { created = JSON.parse(await exec('herdr', ['tab', 'create', '--workspace', env.HERDR_WORKSPACE_ID, '--cwd', request.cwd, '--label', 'Intercom (anonymous)', '--no-focus'])); }
       catch (e) { fail(`Herdr tab launch failed: ${String(e)}; no fallback or cleanup`); }
@@ -56,7 +96,7 @@ export function launchers(options: LauncherOptions) {
     if (request.multiplexer !== 'none') fail('unsupported multiplexer');
     // Use encoded PowerShell rather than constructing cmd.exe command strings.
     // The outer process reports only successful visible terminal creation, not Pi readiness.
-    const child = `$ErrorActionPreference='Stop'; Get-ChildItem Env: | Where-Object { $_.Name -like 'HERDR_*' -or $_.Name -like 'PI_SESSION_*' } | ForEach-Object { Remove-Item ('Env:' + $_.Name) }; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.cmd -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
+    const child = `$ErrorActionPreference='Stop'; Get-ChildItem Env: | Where-Object { $_.Name -like 'HERDR_*' -or $_.Name -like 'HC_*' -or $_.Name -like 'PI_SESSION_*' } | ForEach-Object { Remove-Item ('Env:' + $_.Name) }; Set-Location -LiteralPath ${psQuote(request.cwd)}; & (Get-Command pi.cmd -ErrorAction Stop).Source ${args.map(psQuote).join(' ')}; if ($LASTEXITCODE -ne 0) { Write-Error ('Pi exited with code ' + $LASTEXITCODE) }`;
     const outer = `$ErrorActionPreference='Stop'; $null=Get-Command pi.cmd -ErrorAction Stop; $p=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WorkingDirectory ${psQuote(request.cwd)} -ArgumentList @('-NoProfile','-NoExit','-EncodedCommand',${psQuote(encoded(child))}) -WindowStyle Normal -PassThru; $p.Id`;
     const result = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(outer)]);
     const pid = Number(result.trim());
@@ -64,6 +104,10 @@ export function launchers(options: LauncherOptions) {
     return { terminalLaunched: true, pid, piReadiness: 'not observed; inspect visible terminal for startup failures', registrationAwaited: false };
   }
   async function syncName(name: string): Promise<void> {
+    if (env.HC_TERMINAL_ID !== undefined) {
+      await renameCoreTab(env.HC_TERMINAL_ID, name, options.coreCall);
+      return;
+    }
     if (env.HERDR_ENV !== '1') return;
     // Resolve inherited pane context, including panes moved since launch.
     if (!env.HERDR_PANE_ID) fail('Herdr tab name sync requires caller pane identity');

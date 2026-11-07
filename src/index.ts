@@ -5,7 +5,7 @@ import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMut
 import { ConfigStore } from './config.js';
 import { Intercom, UNSUPPORTED_CANCELLATION } from './runtime.js';
 import { launchers } from './launcher.js';
-import { ensureMonitorPane } from './monitor-launcher.js';
+import { ensureMonitorPane, closeMonitorPane } from './monitor-launcher.js';
 import { createActivityTracker } from './activity.js';
 import { createCloseProvider } from './pane-close.js';
 
@@ -26,6 +26,9 @@ const tools: [string, string, TSchema][] = [
   ['report_handoff', 'Configured worker only, in response to its pending close request. Submit the matching jobId and concise public resume handoff (current work, completed work, unfinished items, blockers, next step). Never include secrets, private reasoning or raw tool payloads. Saved receipt is not closure: finish the response and wait; the extension requires final turn settlement before pane closure.', Type.Object({ jobId: Type.String({ minLength: 1, maxLength: 128 }), summary: Type.String({ minLength: 1, maxLength: 4000 }) })],
   ['resume_worker', 'Coordinator only. Resume saved session/name/responsibility after the user explicitly confirms the old session was closed: set confirmClosed:true only for that confirmation, never infer it from disconnected status. A matching live health endpoint blocks launch. In-flight/uncertain attempts are fenced until worker status arrives; otherwise inspect process and reload coordinator before considering retry. Saved subfolder launches are refused rather than relocated, because a worker cannot use a parent config. No cross-process uniqueness guarantee, automatic assignment, replacement or removal.', Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }), confirmClosed: Type.Boolean() })],
   ['remove_worker', 'Coordinator only. Remove config entry only; never stop process or delete session files. A running worker must be explicitly closed before removal. Retain registration to resume it later; remove only to forget it. Pending or uncertain close jobs block removal.', to],
+  ['open_monitor', "Coordinator only. Open or reuse the owned status monitor, including with no workers. Explicit placement is required: ask the user if unknown; never guess or fall back to saved settings. Currently supported: 'coordinator-tab' (pane above the coordinator in its current tab), 'new-tab' (separate tab). Does not assign worker work or change saved settings.", Type.Object({ placement: Type.String({ minLength: 1 }) })],
+  ['close_monitor', 'Coordinator only. Close only the verified owned status monitor pane, not a worker, coordinator or whole tab. Does not change saved auto-open settings.', Type.Object({})],
+  ['configure_monitor', "Coordinator only. Persist autoOpen and/or placement for future monitor openings. At least one setting is required. Currently supported placement values: 'coordinator-tab' (pane above the coordinator in its current tab), 'new-tab' (separate tab). Does not open, close or move panes.", Type.Object({ autoOpen: Type.Optional(Type.Boolean()), placement: Type.Optional(Type.String({ minLength: 1 })) }, { minProperties: 1, additionalProperties: false })],
   ['set_multiplexer', 'Coordinator only. Set herdr (default, Windows/Linux) or none (separate visible Windows terminals; unsupported on Linux) for future launches. Never move/restart existing workers or fall back.', Type.Object({ multiplexer: Type.String({ enum: ['herdr', 'none'] }) })],
 ];
 
@@ -62,29 +65,31 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     extension: fileURLToPath(import.meta.url),
     sessionExists: async (cwd, id) => (await SessionManager.list(cwd, resumeSessionDirectory(cwd))).some(s => s.id === id),
   });
-  let monitorTask: { runtime: Intercom; generation: number; dirty: boolean; promise: Promise<void> } | undefined;
+  let monitorAutoEpoch = 0;
+  let monitorTask: { runtime: Intercom; generation: number; epoch: number; dirty: boolean; promise: Promise<void> } | undefined;
   async function ensureCoordinatorMonitor(current: Intercom, ctx: ExtensionContext, started: number): Promise<void> {
-    const isCurrent = () => started === generation && runtime === current;
+    const epoch = monitorAutoEpoch;
+    const isCurrent = () => started === generation && runtime === current && epoch === monitorAutoEpoch;
     if (!isCurrent()) return;
-    if (monitorTask?.runtime === current && monitorTask.generation === started) {
+    if (monitorTask?.runtime === current && monitorTask.generation === started && monitorTask.epoch === epoch) {
       monitorTask.dirty = true;
       return monitorTask.promise;
     }
     const check = async () => {
       try {
-        const { config, me, id } = await current.state();
+        const { config, me } = await current.state();
         if (!isCurrent() || !me?.coordinator || !config.agents.some(agent => !agent.coordinator)) return;
-        const monitor = await ensureMonitorPane({
-          root: current.store.root, sessionId: id,
-          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
-          assertCurrent: () => { if (!isCurrent()) throw new Error('Coordinator session changed'); },
-        });
+        const settings = await current.getMonitorSettings();
+        if (!isCurrent() || !settings.autoOpen) return;
+        const monitor = await current.autoOpenMonitor(() => {
+          if (!isCurrent()) throw new Error('Automatic monitor request superseded');
+        }) as Awaited<ReturnType<typeof ensureMonitorPane>>;
         if (isCurrent()) ctx.ui.notify(`Intercom status monitor: ${monitor.outcome}${monitor.pane ? ` (${monitor.pane})` : ''}`, 'info');
       } catch (error) {
         if (isCurrent()) ctx.ui.notify(String(error), 'warning');
       }
     };
-    const task = { runtime: current, generation: started, dirty: false, promise: Promise.resolve() };
+    const task = { runtime: current, generation: started, epoch, dirty: false, promise: Promise.resolve() };
     monitorTask = task;
     task.promise = (async () => {
       do { task.dirty = false; await check(); } while (task.dirty && isCurrent());
@@ -116,6 +121,22 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
       launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot,
+      monitor: {
+        open: request => ensureMonitorPane({ ...request,
+          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
+          assertCurrent: () => {
+            request.assertCurrent();
+            if (started !== generation || runtime !== current) throw new Error('Coordinator session changed');
+          },
+        }),
+        close: request => closeMonitorPane({ ...request,
+          script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
+          assertCurrent: () => {
+            request.assertCurrent();
+            if (started !== generation || runtime !== current) throw new Error('Coordinator session changed');
+          },
+        }),
+      },
       closeProvider: createCloseProvider({
         sessionId: () => context!.sessionManager.getSessionId(),
         sessionFile: () => context!.sessionManager.getSessionFile(),
@@ -202,6 +223,12 @@ export default function intercomExtension(pi: ExtensionAPI): void {
         signal?.throwIfAborted(); context = ctx;
         if (!runtime) throw new Error('PiIntercom not initialized; inspect startup error.');
         const current = runtime, started = generation;
+        if (operation === 'close_monitor') {
+          const state = await current.state();
+          if (started !== generation || runtime !== current) throw new Error('Coordinator session changed');
+          if (!state.me?.coordinator) throw new Error('PiIntercom: coordinator permission required');
+          monitorAutoEpoch++; // Fence prior automatic passes; lock refusal never schedules a retry.
+        }
         const result = await current.tool(operation, args as Record<string, unknown>, _id, signal);
         if (operation === 'configure_worker') await ensureCoordinatorMonitor(current, ctx, started);
         const output = truncateHead(JSON.stringify(result, null, 2));

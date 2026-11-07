@@ -110,7 +110,7 @@ Created/resumed workers receive `--intercom-root /absolute/session/root` explici
 
 **Upgrade note:** Existing subfolder workers cannot rejoin a parent roster by supplying a flag. Their saved history/config entries are retained, but launching them in a subfolder with the parent's config is refused. Use workers whose configured directory is the coordinator root, and explicitly describe any subfolder work in their assignment. Independent sessions started in subfolders use only their own local config; ancestor files are left untouched.
 
-Default launcher `herdr` requires the coordinator to be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
+The `herdr` launcher selects the new core when `HC_TERMINAL_ID` is present; see [new Herdr compatibility](#new-herdr-coreapp-compatibility). For the **legacy backend**, the coordinator must be inside Herdr (`HERDR_ENV=1` and workspace context), with `herdr` on PATH. Windows needs `powershell.exe` plus `pi.ps1` in the worker pane; Linux needs `sh` plus `pi`. Each worker gets **one tab, one pane, no split, no focus change**. The Windows-only `none` launcher requires `pi.cmd` and Windows PowerShell on PATH and opens a separate visible PowerShell terminal. Missing launcher is an error, not fallback. Launch acknowledgment means command submission/terminal creation, not Pi readiness. A failed launch can leave a tab or process behind; no automatic cleanup occurs. See the scoped live evidence below.
 
 ## Explicit workflow
 
@@ -145,6 +145,9 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_resume_worker` | `to`, `confirmClosed` | Coordinator; user-confirmed old-session closure, saved session/launcher/directory, guarded launch |
 | `intercom_remove_worker` | `to` (worker name) | Coordinator; config entry only, no shutdown/session deletion |
 | `intercom_set_multiplexer` | `multiplexer`: `herdr` or `none` | Coordinator; future launches only |
+| `intercom_open_monitor` | Required `placement`: `coordinator-tab` or `new-tab` | Coordinator; open/preserve the Herdr monitor; ask the user if placement is unknown, never infer it from saved settings; allows an empty roster |
+| `intercom_close_monitor` | None | Coordinator; close only the verified owned monitor pane, never worker panes or a whole tab |
+| `intercom_configure_monitor` | `autoOpen?`, `placement?` (at least one) | Coordinator; persist startup/reload preferences only; does not open, close or move existing panes |
 
 **Removal precondition:** close a running worker before removing its entry. Removal forgets the registration; it is not how to park a worker for later resume. Active/uncertain close jobs fence removal and other lifecycle/work operations. Saved IDs/ports alone do not prove closure; no force-kill fallback occurs.
 
@@ -212,9 +215,43 @@ Version 0.2.0 telemetry adds an optional envelope `correlationId` for one transp
 
 Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains in the shared config file. Name sync errors are surfaced; startup retains the useful endpoint, and explicit reload reports failure (Pi name/responsibility may already have changed before a Herdr tab rename fails).
 
+## New Herdr core/app compatibility
+
+Intercom now detects `HC_TERMINAL_ID` and uses the reviewed **herdr-core 0.1.18** protocol. The Windows UI can be local or connected to a Linux/Windows core. Worker creation/resume, actual tab names, and monitor layout use a single verified core connection and the machine-owned `herdr-app` document. This is a source-backed adapter for the **herdr-app 0.1.13 layout format**, not a public versioned tab API. Unsupported layouts (including stacks and terminal floats) fail closed. Shared-state confirmation is not proof that a remote window rendered it.
+
+Configured workers rename their own actual tab on startup/reload; the coordinator retains its title (for example, **Main**). New workers get a dedicated tab in the coordinator's space. No provider/model override or initial task is injected. Core launches retain independent worker lifetimes; creating a terminal is not proof of Pi readiness.
+
+Unix connects directly to the existing core socket without starting a server. `HC_SOCKET` selects an explicit endpoint; otherwise documented default paths are used only when no core config file is present. If a config file could override the socket, set `HC_SOCKET` explicitly. Windows uses the reviewed existing-core status preflight; a core disappearing between preflight and connect is not an atomic no-autostart guarantee. Legacy `HERDR_*` support remains selected only by explicit legacy context, never as fallback after an HC error.
+
+Monitor open/close supports both core platforms. Close refuses observed live descendants, persists a pending fence, revalidates ownership, stops the owned monitor once and removes only its layout pane. Core termination can cascade to dependent terminals: another client concurrently attaching children is outside the non-atomic preflight guarantee. Worker handoff-close remains Linux-only, requires session-header/PID-start proof and the existing persistence/settlement/commit checks, and likewise refuses observed live descendants. Neither close promises atomic quiescence or an all-descendants guarantee. Uncertain operations are not replayed.
+
+Old monitor ownership records are not converted into new-core ownership. They require inspection before removal; Intercom will not adopt or delete an unknown pane. See [migration validation and limitations](references/herdr-core-migration.md).
+
 ## Standalone terminal status monitor
 
-When at least one worker is registered, the coordinator automatically checks for its monitor pane on startup inside Herdr. If missing, it creates a small pane **above the coordinator**, preserving coordinator focus. With no workers, it does not create/check the monitor. Configuring the first worker triggers the check; disconnected saved workers still count. This does not automatically close an already-existing monitor when the final worker is removed. This is a standalone Node/pi-tui program, **not another Pi instance**. The old inline widget implementation has been removed. Source installations must run `npm run build` before reloading Pi; published packages include the compiled `dist/monitor.js` entry.
+By default, when at least one worker is registered, the coordinator automatically checks for its monitor pane on startup/reload inside Herdr. If missing, it creates a small pane **above the coordinator**, preserving coordinator focus. Set `monitor.autoOpen` to false to disable automatic opening, or set `monitor.placement` to `new-tab` to use a separate tab instead. With no workers, it does not create/check the monitor. Configuring the first worker triggers the check; disconnected saved workers still count. This does not automatically close an already-existing monitor when the final worker is removed. This is a standalone Node/pi-tui program, **not another Pi instance**. The old inline widget implementation has been removed. Source installations must run `npm run build` before reloading Pi; published packages include the compiled `dist/monitor.js` entry.
+
+### Explicit monitor controls and saved preferences
+
+```js
+intercom_configure_monitor({ autoOpen: true, placement: "new-tab" })
+intercom_open_monitor({ placement: "new-tab" }) // Explicit choice required, even with no workers.
+intercom_close_monitor({}) // Only the verified monitor pane.
+intercom_open_monitor({ placement: "coordinator-tab" }) // One-off placement override.
+```
+
+The optional project-config section is:
+
+```json
+"monitor": {
+  "autoOpen": true,
+  "placement": "coordinator-tab"
+}
+```
+
+Older configurations without this section retain the defaults above. Configuration updates affect future automatic opening, not an existing pane. Explicit `intercom_open_monitor` calls must always supply `placement` as a string. The tool schema intentionally has no enum; its description lists the currently supported strings (`coordinator-tab` and `new-tab`), and runtime validation rejects unsupported values. If the agent does not know the user's choice, it must ask rather than guess or use the saved preference. The explicit placement does not change the saved automatic-opening preference. If the monitor already exists in a different placement, close it first; Intercom does not relocate it or create a duplicate. A manual close invalidates earlier automatic-opening requests, but does not disable `autoOpen`: a later startup/reload can reopen it when workers are registered. To keep it closed, disable automatic opening too. Concurrent operations may report a lock or partial-operation fence instead of succeeding; they are not automatically retried. Preferences are checked at automatic admission, not an atomic cancellation of an already-submitted Herdr command.
+
+Both placements preserve coordinator focus. New-tab placement creates a monitor pane in its own tab; close targets that recorded pane only, even if other panes were later added to the tab or the saved placement preference changed. Ownership uncertainty or partial creation/closure requires inspection, not blind retries. Legacy panes adopted from their label alone are not authorized for tool-driven closure; they require manual inspection. Close rechecks ownership before submitting one pane-close request and observes pane absence afterward; Herdr does not provide an atomic compare-and-close operation, and pane absence does not prove all child processes exited. Monitor controls do not arm worker-follow-up reminders and do not stop workers.
 
 The table uses aligned **Worker | Connection | Report | Activity | Seen | Last activity** columns (activity age/detail give way first on narrow panes). Report is explicitly worker-authored and separate from host activity. Activity is the last reported `working`, `thinking`, `idle`, `closed`, or `unknown` state. Seen marks evidence older than 60 seconds with `(old)`; this is not a live connection indicator. Last activity uses fixed public labels such as Reading files, Running command or Writing response and can persist after the worker settles. Recent working/thinking/idle observations use restrained colors; old evidence remains neutral and explicitly marked. `NO_COLOR` disables styling. Version 0.5.2 adds a small footer label for the Intercom package version loaded by the monitor at startup; restart the monitor after updating to load the new version. Narrow panes use a compact version label and preserve the quit hint. No read-only banner or busy/idle count summary is shown. It reads the bounded config/log snapshot and performs read-only loopback health checks, then refreshes roughly three seconds after completion, without worker prompts or model calls. Checks are bounded by 750 ms per endpoint, a four-second batch budget, 16 concurrent requests and 256 workers; no overlapping batches or retries. Closing the monitor aborts checks. Only observed activity is shown, not inferred assignments/completion. Evidence over 60 seconds old is stale; missing evidence is unknown. The number of worker rows adapts to the pane height, with an omitted count when needed. The display is clipped to pane dimensions. In the monitor pane, use **↑/↓** to select a worker and **Enter** to toggle its details (configured responsibility and observed status). Selection follows the worker across roster reorder and scrolls the visible window. **Escape** closes details first, then quits; **q** or **Ctrl+C** always quits only the display process, never agents or their panes.
 
@@ -311,6 +348,15 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.9.0 — new Herdr core/app integration
+
+- Add explicit string-placement monitor tools and saved automatic-opening preferences.
+- Add core-backed worker launch/resume, actual remote tab naming and monitor layout, preserving coordinator names and focus state.
+- Add guarded monitor closure and Linux worker handoff-close for the new core, with identity checks, descendant refusal, CAS and uncertainty fences.
+- Isolate adapter tests from inherited live `HC_*`/`HERDR_*` identities; a fixture must never rename a real tab.
+- Update the development SDK's scoped `minimatch` override to 11.0.1 to address the new audit advisory; installed dependency and compatibility tests are checked separately.
+- Native Windows execution and remote-window rendering remain acceptance checks, not claims established by mocked tests.
 
 ### 0.8.1 Tag-only releases and dependency security updates
 

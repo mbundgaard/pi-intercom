@@ -15,8 +15,10 @@ import { readObservationSnapshot } from '../dist/snapshot.js';
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-adapter-'));
-  const inheritedHerdr = process.env.HERDR_ENV;
-  delete process.env.HERDR_ENV;
+  // Never let a mocked worker use the real host terminal or desktop connection.
+  const isolatedKeys = Object.keys(process.env).filter(key => key.startsWith('HC_') || key.startsWith('HERDR_'));
+  const inheritedHerdr = new Map(isolatedKeys.map(key => [key, process.env[key]]));
+  for (const key of isolatedKeys) delete process.env[key];
   const tools = new Map(), events = new Map(), flags = new Map(), flagValues = new Map(), messages = [], notices = [], names = [], widgets = [];
   let id = 'adapter-coordinator', idle = true, name = '', failName = false;
   const pi = {
@@ -33,7 +35,8 @@ async function adapter(t) {
   t.after(async () => {
     try { await events.get('session_shutdown')(); }
     finally {
-      if (inheritedHerdr === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = inheritedHerdr;
+      for (const key of Object.keys(process.env)) if (key.startsWith('HC_') || key.startsWith('HERDR_')) delete process.env[key];
+      for (const [key, value] of inheritedHerdr) if (value !== undefined) process.env[key] = value;
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -118,6 +121,96 @@ test('empty roster skips monitor; first registered worker requests it without pr
   a.setId('monitor-replacement-worker'); await a.start();
   assert.equal(a.widgets.length, 0);
   assert.equal(a.notices.filter(n => /monitor|Herdr/i.test(n.text)).length, count, 'worker sessions do not request a monitor');
+});
+
+test('monitor settings suppress automatic opening; explicit tools use runtime guards without live Herdr', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('adapter-coordinator', 12345);
+  await store.update('adapter-coordinator', config => { config.monitor = { autoOpen: false, placement: 'new-tab' }; });
+  await store.configure('adapter-coordinator', {sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
+  await a.start();
+  assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
+  await a.invoke('configure_worker', {sessionId:'other-worker',name:'Other',description:'Saved',port:12347,projectDirectory:'.'});
+  assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
+  await a.invoke('configure_monitor', { autoOpen: true });
+  assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false, 'settings alone never open a pane');
+  const original = Intercom.prototype.tool;
+  let opened;
+  Intercom.prototype.tool = async function(operation, args, ...rest) {
+    if (operation === 'open_monitor') {
+      const previous = this.options.monitor.open;
+      this.options.monitor.open = async request => { opened = request; request.assertCurrent(); return { outcome: 'test-opened' }; };
+      try { return await original.call(this, operation, args, ...rest); }
+      finally { this.options.monitor.open = previous; }
+    }
+    return original.call(this, operation, args, ...rest);
+  };
+  try {
+    await assert.rejects(a.invoke('open_monitor'), /explicit monitor placement is required/);
+    await assert.rejects(a.invoke('open_monitor', { placement: undefined }), /explicit monitor placement is required/);
+    assert.equal(opened, undefined);
+    await a.invoke('open_monitor', { placement: 'new-tab' });
+    assert.equal(opened.placement, 'new-tab'); assert.equal(opened.sessionId, 'adapter-coordinator');
+    assert.equal(opened.root, (await store.constructor.discover(a.root)).root);
+    const closed = await a.invoke('close_monitor');
+    assert.match(closed.content[0].text, /not inside Herdr/);
+  } finally { Intercom.prototype.tool = original; }
+});
+
+test('automatic opening honors saved placement and explicit opening works with empty roster', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root), original = Intercom.prototype.tool;
+  const originalAuto = Intercom.prototype.autoOpenMonitor;
+  const requests = [];
+  Intercom.prototype.autoOpenMonitor = async function(guard) {
+    const previous = this.options.monitor.open;
+    this.options.monitor.open = async request => { request.assertCurrent(); requests.push(request); return { outcome: 'test-opened' }; };
+    try { return await originalAuto.call(this, guard); }
+    finally { this.options.monitor.open = previous; }
+  };
+  Intercom.prototype.tool = async function(operation, args, ...rest) {
+    if (operation !== 'open_monitor') return original.call(this, operation, args, ...rest);
+    const previous = this.options.monitor.open;
+    this.options.monitor.open = async request => { request.assertCurrent(); requests.push(request); return { outcome: 'test-opened' }; };
+    try { return await original.call(this, operation, args, ...rest); }
+    finally { this.options.monitor.open = previous; }
+  };
+  try {
+    await a.start(); assert.equal(requests.length, 0);
+    await a.invoke('open_monitor', { placement: 'coordinator-tab' }); assert.equal(requests.length, 1); assert.equal(requests[0].placement, 'coordinator-tab');
+    await a.invoke('configure_monitor', { placement: 'new-tab' }); assert.equal(requests.length, 1);
+    await a.invoke('configure_worker', {sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
+    assert.equal(requests.length, 2); assert.equal(requests[1].placement, 'new-tab');
+    assert.deepEqual((await store.read()).monitor, { autoOpen: true, placement: 'new-tab' });
+  } finally { Intercom.prototype.tool = original; Intercom.prototype.autoOpenMonitor = originalAuto; }
+});
+
+test('manual close fences in-flight automatic open and queued passes without retrying a lock refusal', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  const original = Intercom.prototype.autoOpenMonitor, originalTool = Intercom.prototype.tool;
+  let release, entered, secondWritten, attempts = 0, sideEffects = 0, closeAttempts = 0;
+  const written = new Promise(resolve => { secondWritten = resolve; });
+  Intercom.prototype.tool = async function(operation, args, ...rest) {
+    const result = await originalTool.call(this, operation, args, ...rest);
+    if (operation === 'configure_worker' && args.sessionId === 'second-worker') secondWritten();
+    return result;
+  };
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  Intercom.prototype.autoOpenMonitor = async function(guard) {
+    attempts++;
+    this.options.monitor.open = async request => { entered(); await gate; request.assertCurrent(); sideEffects++; return { outcome: 'test-opened' }; };
+    this.options.monitor.close = async () => { closeAttempts++; throw new Error('Monitor locked; inspect before retry'); };
+    return original.call(this, guard);
+  };
+  try {
+    const first = a.invoke('configure_worker', {sessionId:'first-worker',name:'First',description:'Saved',port:12346,projectDirectory:'.'});
+    await started;
+    const second = a.invoke('configure_worker', {sessionId:'second-worker',name:'Second',description:'Saved',port:12347,projectDirectory:'.'});
+    await written; await new Promise(resolve => setImmediate(resolve));
+    await assert.rejects(a.invoke('close_monitor'), /locked/);
+    release(); await Promise.all([first, second]);
+  } finally { release(); Intercom.prototype.autoOpenMonitor = original; Intercom.prototype.tool = originalTool; }
+  assert.equal(sideEffects, 0); assert.equal(attempts, 1); assert.equal(closeAttempts, 1);
 });
 
 test('startup with a saved disconnected worker still requests monitor without renaming coordinator', supportedHost, async t => {
@@ -215,7 +308,21 @@ test('single extension registers all agreed tools without starting resources in 
     registerFlag: (name, options) => flags.set(name, options), getFlag: () => assert.fail('flags resolve only during session_start') });
   assert.equal(flags.get('intercom-root').type, 'string');
   assert.equal(flags.get('intercom-root').default, undefined);
-  assert.equal(tools.size, 16);
+  assert.equal(tools.size, 19);
+  assert.equal(tools.get('intercom_configure_monitor').parameters.minProperties, 1);
+  assert.equal(tools.get('intercom_configure_monitor').parameters.additionalProperties, false);
+  for (const name of ['intercom_open_monitor', 'intercom_configure_monitor']) {
+    const tool = tools.get(name);
+    assert.equal(tool.parameters.properties.placement.type, 'string');
+    assert.equal(tool.parameters.properties.placement.minLength, 1);
+    assert.equal(Object.hasOwn(tool.parameters.properties.placement, 'enum'), false);
+    assert.match(tool.description, /'coordinator-tab' \(pane above the coordinator in its current tab\)/);
+    assert.match(tool.description, /'new-tab' \(separate tab\)/);
+  }
+  assert.equal(tools.get('intercom_configure_monitor').parameters.required?.includes('placement') ?? false, false);
+  assert.deepEqual(tools.get('intercom_open_monitor').parameters.required, ['placement']);
+  assert.match(tools.get('intercom_open_monitor').description, /ask the user if unknown; never guess or fall back/);
+  assert.deepEqual(Object.keys(tools.get('intercom_close_monitor').parameters.properties), []);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);

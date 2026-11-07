@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
-import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, type Agent, type Config } from './config.js';
+import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, monitorSettings, validateMonitorSettings, type MonitorSettings, type Agent, type Config } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
 import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
@@ -21,6 +21,11 @@ export interface Host {
   notify(text: string): void;
 }
 export interface LaunchRequest { multiplexer: 'herdr' | 'none'; cwd: string; workspaceRoot: string; sessionId?: string }
+export interface MonitorRequest { root: string; sessionId: string; assertCurrent(): void }
+export interface MonitorOperations {
+  open(request: MonitorRequest & { placement: MonitorSettings['placement'] }): Promise<unknown>;
+  close(request: MonitorRequest): Promise<unknown>;
+}
 export interface RuntimeOptions {
   launch(request: LaunchRequest): Promise<unknown>;
   listen?: typeof listen;
@@ -32,6 +37,7 @@ export interface RuntimeOptions {
   /** Test seam; production defaults to 120 seconds, values above that are capped. */
   closeTimeoutMs?: number;
   reminderClock?: ReminderClock;
+  monitor?: MonitorOperations;
   /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
   workspaceRoot?: string;
 }
@@ -203,6 +209,32 @@ export class Intercom {
     const id = this.id(), config = await this.store.read();
     assertValid();
     return { id, config, me: config.agents.find(a => a.sessionId === id) };
+  }
+  async getMonitorSettings(): Promise<MonitorSettings> {
+    const assertValid = this.validity();
+    const { id, config } = await this.state();
+    assertValid(); requireCoordinator(config, id);
+    return monitorSettings(config);
+  }
+  /** Automatic admission is internal: explicit open remains allowed with disabled auto-open or no workers. */
+  async autoOpenMonitor(assertAdmission: () => void = () => {}): Promise<unknown> { return this.operateMonitor('open_monitor', {}, true, assertAdmission); }
+  private async operateMonitor(operation: 'open_monitor' | 'close_monitor', args: Record<string, unknown>, automatic = false, assertAdmission: () => void = () => {}): Promise<unknown> {
+    const lifecycle = this.validity();
+    const assertValid = () => { lifecycle(); assertAdmission(); };
+    assertValid();
+    if (Object.keys(args).some(key => operation === 'close_monitor' || key !== 'placement')) fail('invalid monitor operation arguments');
+    if (operation === 'open_monitor' && !automatic && !['coordinator-tab', 'new-tab'].includes(args.placement as string)) fail('explicit monitor placement is required; ask the user if unknown');
+    const fresh = await this.state(); assertValid(); requireCoordinator(fresh.config, fresh.id);
+    const settings = monitorSettings(fresh.config);
+    if (automatic && (!settings.autoOpen || !fresh.config.agents.some(agent => !agent.coordinator))) return { outcome: 'automatic monitor skipped' };
+    if (!this.options.monitor) fail('monitor adapter unavailable; no pane action attempted');
+    const request: MonitorRequest = { root: this.store.root, sessionId: fresh.id, assertCurrent: assertValid };
+    const result = operation === 'open_monitor'
+      ? await this.options.monitor.open({ ...request, placement: (automatic ? settings.placement : args.placement) as MonitorSettings['placement'] })
+      : await this.options.monitor.close(request);
+    assertValid();
+    const after = await this.state(); assertValid(); requireCoordinator(after.config, fresh.id);
+    return result;
   }
   /** Accept old configs, but retire the removed browser dashboard's discovery metadata. */
   async retireDashboardMetadata(): Promise<void> {
@@ -412,6 +444,20 @@ export class Intercom {
       await this.transmit(args.to as string, 'message', { message: args.message }); return { accepted: true, completion: 'not awaited' };
     }
     requireCoordinator(config, id);
+    if (operation === 'configure_monitor') {
+      const keys = Object.keys(args);
+      if (!keys.length || keys.some(key => !['autoOpen', 'placement'].includes(key))) fail('configure_monitor requires autoOpen and/or placement only');
+      validateMonitorSettings({ ...monitorSettings(config), ...args });
+      const updated = await this.store.update(id, current => {
+        current.monitor = { ...monitorSettings(current), ...args } as MonitorSettings;
+        validateMonitorSettings(current.monitor);
+      }, assertValid);
+      assertValid();
+      return { written: true, monitor: monitorSettings(updated), paneEffects: false };
+    }
+    if (operation === 'open_monitor' || operation === 'close_monitor') {
+      return this.operateMonitor(operation, args);
+    }
     if (operation === 'stop_reminders') {
       const current = invocation >= this.reminderRevision;
       if (current) { this.reminderRevision = invocation; this.reminders?.stop(); }

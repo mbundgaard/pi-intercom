@@ -5,6 +5,7 @@ import { open, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Run } from './launcher.js';
 import type { CloseProvider, WorkerPaneIdentity } from './handoff.js';
+import { createCoreCloseProvider } from './core-pane-close.js';
 
 interface ProcessIdentity { start: string; state: string }
 export interface PaneCloseOptions {
@@ -53,6 +54,7 @@ const alive = (identity: ProcessIdentity | undefined, start: string) =>
 /** Linux Herdr only. Identity-checked best effort; Herdr has no atomic compare-and-close API. */
 export function createCloseProvider(options: PaneCloseOptions): CloseProvider | undefined {
   const env = options.env ?? process.env;
+  if (env.HC_TERMINAL_ID !== undefined) return createCoreCloseProvider(options);
   if ((options.platform ?? process.platform) !== 'linux' || env.HERDR_ENV !== '1' || !env.HERDR_PANE_ID) return;
   const run = options.run ?? exec;
   const processIdentity = options.processIdentity ?? linuxProcessIdentity;

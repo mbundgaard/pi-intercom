@@ -2,7 +2,7 @@
 
 This is the consolidated **target design**, authoritative over conflicting wording in the original proposal and historical discussion notes. It is not a claim that every capability is currently supported. See [README](../README.md) for current behavior, release evidence and validation limits.
 
-**Current capability exception:** `intercom_stop_worker` and `intercom_close_worker` are registered but disabled on every host, before cancellation/shutdown or outgoing control. Their intended guarantees below remain unchanged; see the [cancellation blocker](implementation-blocker.md). Manual-compaction delivery also has a known acceptance gap: HTTP receipt does not guarantee Pi accepted the input. Unresolved contract questions are not silently approved decisions.
+**Historical design versus current capability:** The original V1 targets below are not a current support matrix. `intercom_stop_worker` and graceful cancellation remain disabled; see the [cancellation blocker](implementation-blocker.md). `intercom_close_worker` now uses a separate Linux-owned-pane handoff/settlement/close workflow, not graceful shutdown. New-core compatibility and its non-atomic closure limits are documented in [Herdr migration](herdr-core-migration.md); current supported behavior is in README. Manual-compaction delivery also has a known acceptance gap: HTTP receipt does not guarantee Pi accepted the input. Unresolved contract questions are not silently approved decisions.
 
 ## 1. Scope and principles
 
@@ -32,7 +32,7 @@ Required configuration information:
 
 | Scope | Fields |
 |---|---|
-| Solution | Multiplexer (`herdr` or `none`) |
+| Solution | Multiplexer (`herdr` or `none`); optional monitor preferences `{autoOpen:boolean, placement:'coordinator-tab'|'new-tab'}` (defaults true/coordinator-tab) |
 | Agent | Pi session ID, name, coordinator flag, responsibility description, port |
 | Worker | Project directory relative to coordinator root |
 
@@ -129,17 +129,20 @@ Every invocation reads the current Pi session ID and shared config, determines r
 | `intercom_request_status` | Coordinator | `to` (name) | Ask worker extension to send independent runtime status report |
 | `intercom_report_status` | Worker, including anonymous | None | Invoke shared reporting function; reject on coordinator |
 | `intercom_stop_worker` | Coordinator | `to` (name) | Target: cancel current work; leave Pi and extension running. Currently disabled; unsupported-host error |
-| `intercom_close_worker` | Coordinator | `to` (name) | Target: cancel work, gracefully exit Pi, preserve session/config. Currently disabled; unsupported-host error |
+| `intercom_close_worker` | Coordinator | `to` (name) | Start a Linux Herdr handoff/settlement/owned-pane close job; preserve registration/history. Not graceful cancellation; unsupported elsewhere |
 | `intercom_resume_worker` | Coordinator | `to` (name) | Launch saved session using configured directory and launcher; failures leave config unchanged |
 | `intercom_remove_worker` | Coordinator | `to` (name) | Remove config entry only; no process stop or session-file deletion |
 | `intercom_set_multiplexer` | Coordinator | `multiplexer` | Set `herdr` or `none` for future launches, including resume |
+| `intercom_open_monitor` | Coordinator | Required `placement` | Open/preserve the monitor in Herdr; ask the user if placement is unknown, never infer from saved settings; explicit opening allows an empty roster |
+| `intercom_close_monitor` | Coordinator | None | Close only the verified owned monitor pane, never an entire tab or a worker |
+| `intercom_configure_monitor` | Coordinator | `autoOpen?`, `placement?` | Persist at least one preference; no immediate pane effects |
 
 ### Tool details
 
 - Configure rejects duplicate names, including `Coordinator`, case-insensitively. Keeping a session's own name is allowed.
 - Configure and reload are deliberately separate. Reload is not Pi's extension-code reload, a process restart, cancellation, or a work assignment. Explain this in tool and user documentation.
 - Reload synchronizes Pi session and applicable Herdr tab names to config.
-- Target contract: stop/close use Pi cancellation and graceful shutdown; no force-kill, automatic commit, or rollback. Close does not require a separate stop call. **Currently both fail closed; no stop or shutdown is performed.**
+- Original target contract: stop/close use Pi cancellation and graceful shutdown. This target remains blocked. The implemented close tool is a separate explicit owned-pane termination workflow, without automatic source commits/rollback or an all-descendants guarantee; it does not enable stop/cancellation.
 - Close success at transport level is not proof that process exit has completed.
 - Remove a running worker only after explicitly closing it; removal itself never closes it.
 - Resume failure must be surfaced; no implicit removal, replacement, or reassignment.

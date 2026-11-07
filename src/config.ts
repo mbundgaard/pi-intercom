@@ -15,7 +15,15 @@ export interface Agent {
   handoff?: Handoff;
   closeJob?: CloseJob;
 }
-export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[] }
+export interface MonitorSettings { autoOpen: boolean; placement: 'coordinator-tab' | 'new-tab' }
+export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[]; monitor?: MonitorSettings }
+export function monitorSettings(config: Config): MonitorSettings {
+  return config.monitor ? { ...config.monitor } : { autoOpen: true, placement: 'coordinator-tab' };
+}
+export function validateMonitorSettings(value: unknown): asserts value is MonitorSettings {
+  const settings = value as MonitorSettings;
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings) || typeof settings.autoOpen !== 'boolean' || !['coordinator-tab', 'new-tab'].includes(settings.placement) || Object.keys(settings).some(key => !['autoOpen', 'placement'].includes(key))) fail('invalid monitor settings');
+}
 export const DEFAULT_DESCRIPTION = 'Coordinate workers, delegate work, and manage shared configuration.';
 export const key = (name: string) => name.toLowerCase();
 export function fail(message: string): never { throw new Error(`PiIntercom: ${message}`); }
@@ -32,6 +40,7 @@ export function relativeDirectory(value: unknown): asserts value is string {
 export function validateConfig(value: unknown): Config {
   const c = value as Config;
   if (!c || c.version !== 1 || !['herdr', 'none'].includes(c.multiplexer) || !Array.isArray(c.agents)) fail('invalid config schema/version');
+  if (c.monitor !== undefined) validateMonitorSettings(c.monitor);
   const names = new Set<string>(), ids = new Set<string>();
   for (const a of c.agents) {
     if (!a || typeof a.coordinator !== 'boolean') fail('invalid agent');

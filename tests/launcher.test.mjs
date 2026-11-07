@@ -34,9 +34,9 @@ test('missing Herdr, resume failure and partial launch failure never fall back o
   } });
   await assert.rejects(partial.launch({ multiplexer: 'herdr', cwd: 'D:/p', workspaceRoot: 'D:/p' }), /may remain/); assert.equal(count, 2);
 });
-test('none creates visible terminal with encoded arguments; no inherited Herdr context', async () => {
+test('none creates visible terminal with encoded arguments; no inherited Herdr or HC context', async () => {
   let script;
-  const l = launchers({ ...options, run: async (file, args) => {
+  const l = launchers({ ...options, env: { ...options.env, HC_TERMINAL_ID: 't1', HC_SCOPE: 'scope', HC_TERMINAL_SOCKET: 'socket' }, run: async (file, args) => {
     assert.equal(file, 'powershell.exe');
     script = Buffer.from(args.at(-1), 'base64').toString('utf16le'); return '12345\r\n';
   } });
@@ -45,7 +45,7 @@ test('none creates visible terminal with encoded arguments; no inherited Herdr c
   const base64 = script.match(/'-EncodedCommand','([^']+)'/)[1];
   const inner = Buffer.from(base64, 'base64').toString('utf16le');
   assert.ok(inner.includes("'--intercom-root' '\\\\server\\share\\O''Brien root'"));
-  assert.match(inner, /HERDR_\*/); assert.match(inner, /O''Brien/); assert.match(inner, /'-e'/);
+  assert.match(inner, /HERDR_\*/); assert.match(inner, /HC_\*/); assert.match(inner, /PI_SESSION_\*/); assert.match(inner, /O''Brien/); assert.match(inner, /'-e'/);
   assert.equal(psQuote("a'b"), "'a''b'"); assert.equal(Buffer.from(encoded('hello'), 'base64').toString('utf16le'), 'hello');
 });
 test('launcher requires explicit absolute root before session lookup or process creation', async () => {
