@@ -215,6 +215,19 @@ Version 0.2.0 telemetry adds an optional envelope `correlationId` for one transp
 
 Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains in the shared config file. Name sync errors are surfaced; startup retains the useful endpoint, and explicit reload reports failure (Pi name/responsibility may already have changed before a Herdr tab rename fails).
 
+## Role model defaults
+
+Set optional model defaults directly in `.pi-intercom/config.json`:
+
+```json
+"models": {
+  "coordinator": { "provider": "your-provider", "model": "your-coordinator-model" },
+  "worker": { "provider": "your-provider", "model": "your-worker-model" }
+}
+```
+
+The coordinator-only `intercom_configure_models` tool saves either or both fields; use `null` to remove a default. Saving does not switch running sessions. Defaults apply on startup (including anonymous workers) and idle responsibility reload. Workers use their own Pi model registry and credentials. Missing models or failed selection produce explicit errors without selecting a fallback; startup keeps Intercom messaging available. Busy responsibility reload refuses model application until idle. Unset roles retain Pi's selection, and manual model changes remain allowed until the next startup/reload. No provider credentials are stored in Intercom config.
+
 ## New Herdr core/app compatibility
 
 Intercom now detects `HC_TERMINAL_ID` and uses the reviewed **herdr-core 0.1.18** protocol. The Windows UI can be local or connected to a Linux/Windows core. Worker creation/resume, actual tab names, and monitor layout use a single verified core connection and the machine-owned `herdr-app` document. This is a source-backed adapter for the **herdr-app 0.1.13 layout format**, not a public versioned tab API. Unsupported layouts (including stacks and terminal floats) fail closed. Shared-state confirmation is not proof that a remote window rendered it.
@@ -348,6 +361,12 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.10.0 — role model defaults
+
+- Add optional coordinator and worker provider/model defaults in project config.
+- Add `intercom_configure_models` to save or clear defaults without switching active sessions.
+- Apply defaults through Pi's model API on startup and idle responsibility reload, with explicit selection errors and no fallback or model locking.
 
 ### 0.9.4 — stale monitor-state recovery
 

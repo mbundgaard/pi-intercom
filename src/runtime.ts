@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
-import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, monitorSettings, validateMonitorSettings, type MonitorSettings, type Agent, type Config } from './config.js';
+import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, monitorSettings, validateMonitorSettings, validateModels, type ModelSelection, type ModelSettings, type MonitorSettings, type Agent, type Config } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
 import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
@@ -18,6 +18,7 @@ export interface Host {
   busy(): boolean;
   deliver(text: string, busy: boolean): void;
   setName(name: string): Promise<void>;
+  applyModel?(selection: ModelSelection): Promise<void>;
   notify(text: string): void;
 }
 export interface LaunchRequest { multiplexer: 'herdr' | 'none'; cwd: string; workspaceRoot: string; sessionId?: string }
@@ -153,7 +154,10 @@ export class Intercom {
         assertValid();
         this.host.notify(`Intercom Coordinator ready at 127.0.0.1:${this.endpoint.port}; waiting for user input.`);
       } else {
-        if (me) { try { await this.reload(); } catch (e) { assertValid(); this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`); } }
+        try {
+          if (me) await this.reload();
+          else await this.applyConfiguredModel(config.models?.worker);
+        } catch (e) { assertValid(); this.host.notify(`Name/responsibility synchronization failed: ${String(e)}`); }
         assertValid();
         try {
           if (me) await this.report();
@@ -245,12 +249,21 @@ export class Intercom {
     await this.store.update(id, c => { delete requireCoordinator(c, id).dashboardPort; }, assertValid);
     record('config.changed', { outcome: 'written' });
   }
+  private async applyConfiguredModel(selection: ModelSelection | undefined): Promise<void> {
+    if (!selection) return;
+    if (this.host.busy()) fail('configured model cannot be applied while busy; reload when idle');
+    if (!this.host.applyModel) fail('model selection unavailable in this host');
+    await this.host.applyModel(selection);
+  }
   async reload(): Promise<void> {
     const record = this.captureObserver();
     const assertValid = this.validity();
-    const { me } = await this.state();
+    const { me, config } = await this.state();
     assertValid();
     if (!me) fail('worker not configured; configure_worker must run before reload_worker');
+    const selection = config.models?.[me.coordinator ? 'coordinator' : 'worker'];
+    await this.applyConfiguredModel(selection);
+    assertValid();
     this.responsibility = { ...me };
     // Coordinator is a routing identity, not ownership of the user's Pi/tab title.
     if (!me.coordinator) await this.host.setName(me.name);
@@ -444,6 +457,23 @@ export class Intercom {
       await this.transmit(args.to as string, 'message', { message: args.message }); return { accepted: true, completion: 'not awaited' };
     }
     requireCoordinator(config, id);
+    if (operation === 'configure_models') {
+      const keys = Object.keys(args);
+      if (!keys.length || keys.some(k => !['coordinator', 'worker'].includes(k))) fail('configure_models requires coordinator and/or worker only');
+      const patch = Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null));
+      validateModels(patch);
+      const updated = await this.store.update(id, current => {
+        const models: ModelSettings = { ...current.models };
+        for (const role of keys as (keyof ModelSettings)[]) {
+          if (args[role] === null) delete models[role];
+          else models[role] = patch[role] as ModelSelection;
+        }
+        validateModels(models);
+        current.models = models;
+      }, assertValid);
+      assertValid();
+      return { written: true, models: updated.models, applied: false, appliesOn: 'startup or idle responsibility reload' };
+    }
     if (operation === 'configure_monitor') {
       const keys = Object.keys(args);
       if (!keys.length || keys.some(key => !['autoOpen', 'placement'].includes(key))) fail('configure_monitor requires autoOpen and/or placement only');

@@ -44,6 +44,7 @@ async function adapter(t) {
     setRootFlag: value => flagValues.set('intercom-root', value),
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
     setDelivery: deliver => { pi.sendUserMessage = deliver; },
+    setModelAdapter: (find, set) => { ctx.modelRegistry = { find }; pi.setModel = set; },
     start: () => events.get('session_start')({}, ctx),
     prompt: () => events.get('before_agent_start')({ systemPrompt: 'Original system prompt' }, ctx),
     invoke: (operation, args = {}) => tools.get(`intercom_${operation}`).execute('test', args, undefined, undefined, ctx) };
@@ -308,7 +309,7 @@ test('single extension registers all agreed tools without starting resources in 
     registerFlag: (name, options) => flags.set(name, options), getFlag: () => assert.fail('flags resolve only during session_start') });
   assert.equal(flags.get('intercom-root').type, 'string');
   assert.equal(flags.get('intercom-root').default, undefined);
-  assert.equal(tools.size, 19);
+  assert.equal(tools.size, 20);
   assert.equal(tools.get('intercom_configure_monitor').parameters.minProperties, 1);
   assert.equal(tools.get('intercom_configure_monitor').parameters.additionalProperties, false);
   for (const name of ['intercom_open_monitor', 'intercom_configure_monitor']) {
@@ -589,4 +590,54 @@ test('coordinator startup does not attempt name synchronization; malformed confi
   await a.start();
   assert.ok(a.notices.some(n => n.level === 'error'));
   await assert.rejects(a.invoke('list'), /not initialized/);
+});
+
+
+test('model defaults persist without immediate switching and apply by role on startup', supportedHost, async t => {
+  const a = await adapter(t), calls = [];
+  a.setModelAdapter((provider, id) => ({ provider, id }), async model => { calls.push(model); return true; });
+  await a.start(); assert.deepEqual(calls, []);
+  await a.invoke('configure_models', { coordinator: { provider: 'test', model: 'lead' }, worker: { provider: 'test', model: 'small' } });
+  assert.deepEqual(calls, []);
+  await a.start(); assert.deepEqual(calls, [{provider:'test',id:'lead'}]);
+  await a.invoke('configure_worker', {sessionId:'model-worker',name:'Builder',description:'Saved',port:12346,projectDirectory:'.'});
+  a.setId('model-worker'); await a.start();
+  assert.deepEqual(calls.at(-1), {provider:'test',id:'small'});
+  await assert.rejects(a.invoke('configure_models', {worker:null}), /coordinator/i);
+  a.setId('anonymous-model-worker'); await a.start();
+  assert.deepEqual(calls.at(-1), {provider:'test',id:'small'});
+  assert.equal(calls.length, 3);
+  a.setId('model-worker'); await a.start();
+  const store = new ConfigStore(a.root);
+  await store.update('adapter-coordinator', config => { config.models.worker.model = 'renamed'; });
+  const configBeforeReload = await store.read();
+  await send(configBeforeReload.agents.find(x => x.sessionId === 'model-worker').port, { version:1, from:'adapter-coordinator', to:'model-worker', kind:'reload', payload:{} });
+  assert.deepEqual(calls.at(-1), {provider:'test',id:'renamed'});
+  a.setId('adapter-coordinator'); await a.start();
+  await a.invoke('configure_models', {coordinator:null});
+  const before = calls.length; await a.start(); assert.equal(calls.length,before);
+  const config = await new ConfigStore(a.root).read();
+  assert.deepEqual(config.models, {worker:{provider:'test',model:'renamed'}});
+});
+
+test('model configuration rejects malformed values and preserves previous configuration', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  for (const value of [{}, {other:{}}, {worker:{}}, {worker:{provider:'p',model:' '}}, {worker:{provider:'p',model:'m',extra:true}}, {worker:[]}]) {
+    await assert.rejects(a.invoke('configure_models', value));
+    assert.equal((await new ConfigStore(a.root).read()).models, undefined);
+  }
+});
+
+test('unavailable models, failed selection and busy startup report errors without fallback', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  await a.invoke('configure_models', {coordinator:{provider:'missing',model:'m'}});
+  let attempts = 0;
+  a.setModelAdapter(() => undefined, async () => { attempts++; return true; });
+  await a.start(); assert.equal(attempts,0);
+  assert.ok(a.notices.some(n => n.text.includes('configured model unavailable')));
+  a.setModelAdapter((provider,id) => ({provider,id}), async () => { attempts++; return false; });
+  await a.start(); assert.equal(attempts,1);
+  assert.ok(a.notices.some(n => n.text.includes('could not select configured model')));
+  a.setIdle(false); await a.start(); assert.equal(attempts,1);
+  assert.ok(a.notices.some(n => n.text.includes('reload when idle')));
 });

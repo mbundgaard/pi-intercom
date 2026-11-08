@@ -16,7 +16,20 @@ export interface Agent {
   closeJob?: CloseJob;
 }
 export interface MonitorSettings { autoOpen: boolean; placement: 'coordinator-tab' | 'new-tab' }
-export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[]; monitor?: MonitorSettings }
+export interface ModelSelection { provider: string; model: string }
+export interface ModelSettings { coordinator?: ModelSelection; worker?: ModelSelection }
+export function validateModels(value: unknown): asserts value is ModelSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['coordinator', 'worker'].includes(k))) fail('invalid model settings');
+  for (const selection of Object.values(value)) {
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection) || Object.keys(selection).some(k => !['provider', 'model'].includes(k))) fail('invalid model selection');
+    for (const key of ['provider', 'model']) {
+      const field = selection[key];
+      text(field, key, 256);
+      if (field !== field.trim() || /[\x00-\x1f\x7f]/.test(field)) fail(`invalid ${key}`);
+    }
+  }
+}
+export interface Config { version: 1; multiplexer: 'herdr' | 'none'; agents: Agent[]; monitor?: MonitorSettings; models?: ModelSettings }
 export function monitorSettings(config: Config): MonitorSettings {
   return config.monitor ? { ...config.monitor } : { autoOpen: true, placement: 'coordinator-tab' };
 }
@@ -41,6 +54,7 @@ export function validateConfig(value: unknown): Config {
   const c = value as Config;
   if (!c || c.version !== 1 || !['herdr', 'none'].includes(c.multiplexer) || !Array.isArray(c.agents)) fail('invalid config schema/version');
   if (c.monitor !== undefined) validateMonitorSettings(c.monitor);
+  if (c.models !== undefined) validateModels(c.models);
   const names = new Set<string>(), ids = new Set<string>();
   for (const a of c.agents) {
     if (!a || typeof a.coordinator !== 'boolean') fail('invalid agent');

@@ -10,7 +10,9 @@ import { createActivityTracker } from './activity.js';
 import { createCloseProvider } from './pane-close.js';
 
 const to = Type.Object({ to: Type.String({ minLength: 1, maxLength: 128 }) });
+const modelSelection = Type.Union([Type.Null(), Type.Object({ provider: Type.String({ minLength: 1, maxLength: 256 }), model: Type.String({ minLength: 1, maxLength: 256 }) }, { additionalProperties: false })]);
 const tools: [string, string, TSchema][] = [
+  ['configure_models', 'Coordinator only. Save coordinator and/or worker provider/model defaults in project config. Null removes a default. Applies on startup or idle responsibility reload, not immediately. Manual model changes remain allowed; unavailable models produce an error without fallback.', Type.Object({ coordinator: Type.Optional(modelSelection), worker: Type.Optional(modelSelection) }, { minProperties: 1, additionalProperties: false })],
   ['create_worker', 'Coordinator only. Launch one anonymous worker at the coordinator root. projectDirectory defaults to root and must resolve to that same directory; subfolder launches cannot use a parent config and are refused. No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()) })],
   ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }) })],
   ['reload_worker', 'Coordinator only. Ask worker to reread responsibility and synchronize names. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
@@ -118,6 +120,12 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       // stale before Pi checks it. Pi still starts a normal turn when idle.
       deliver: content => pi.sendUserMessage(content, { deliverAs: 'steer' }),
       setName: async name => { if (pi.getSessionName() !== name) pi.setSessionName(name); await launcher.syncName(name); },
+      applyModel: async selection => {
+        if (started !== generation || !ctx.isIdle()) throw new Error('Intercom model selection requires the current idle session');
+        const model = ctx.modelRegistry.find(selection.provider, selection.model);
+        if (!model) throw new Error(`Intercom configured model unavailable: ${selection.provider}/${selection.model}; no fallback applied`);
+        if (!await pi.setModel(model)) throw new Error(`Intercom could not select configured model: ${selection.provider}/${selection.model}; check provider credentials; no fallback applied`);
+      },
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
       launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot,
