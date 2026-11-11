@@ -45,11 +45,54 @@ async function adapter(t) {
     setId: value => { id = value; }, setIdle: value => { idle = value; }, failName: value => { failName = value; },
     setDelivery: deliver => { pi.sendUserMessage = deliver; },
     setModelAdapter: (find, set) => { ctx.modelRegistry = { find }; pi.setModel = set; },
-    start: () => events.get('session_start')({}, ctx),
+    // Existing active-runtime tests opt in explicitly. Passive startup is tested separately.
+    start: async () => {
+      await events.get('session_start')({}, ctx);
+      if (flagValues.get('intercom-root') === undefined && !await access(path.join(ctx.cwd, '.pi-intercom', 'config.json')).then(() => true, () => false))
+        await tools.get('intercom_activate').execute('activate-test', {}, undefined, undefined, ctx);
+    },
+    passiveStart: () => events.get('session_start')({}, ctx),
     prompt: () => events.get('before_agent_start')({ systemPrompt: 'Original system prompt' }, ctx),
     invoke: (operation, args = {}) => tools.get(`intercom_${operation}`).execute('test', args, undefined, undefined, ctx) };
 }
 const supportedHost = { skip: !['win32', 'linux'].includes(process.platform) ? 'Windows/Linux extension startup adapter' : false };
+
+test('configless startup is inactive until explicit activation, which is idempotent', supportedHost, async t => {
+  const a = await adapter(t);
+  await a.passiveStart(); await a.passiveStart();
+  await assert.rejects(access(path.join(a.root, '.pi-intercom')));
+  assert.deepEqual(a.names, []); assert.deepEqual(a.messages, []); assert.deepEqual(a.notices, []);
+  assert.equal(await a.prompt(), undefined);
+  await assert.rejects(a.invoke('list'), /inactive/);
+  const activated = JSON.parse((await a.invoke('activate')).content[0].text);
+  assert.equal(activated.role, 'coordinator');
+  const store = new ConfigStore(a.root), before = await store.read();
+  assert.equal(before.agents[0].sessionId, 'adapter-coordinator');
+  await a.invoke('activate'); assert.deepEqual(await store.read(), before);
+  await a.passiveStart();
+  assert.match((await a.prompt()).systemPrompt, /Identity: Coordinator/);
+  assert.equal((await store.read()).agents[0].sessionId, 'adapter-coordinator');
+  a.setId('later-session'); await a.passiveStart();
+  assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
+  assert.equal(JSON.parse((await a.invoke('activate')).content[0].text).role, 'anonymous');
+  assert.equal((await store.read()).agents[0].sessionId, 'adapter-coordinator');
+});
+
+test('ancestor config does not activate a child project; malformed config is never overwritten', supportedHost, async t => {
+  const a = await adapter(t), store = new ConfigStore(a.root);
+  await store.initialize('parent-coordinator', 12345);
+  const child = path.join(a.root, 'child'); await mkdir(child); a.ctx.cwd = child;
+  await a.passiveStart(); assert.equal(await a.prompt(), undefined);
+  await assert.rejects(access(path.join(child, '.pi-intercom')));
+  await a.invoke('activate');
+  assert.equal((await new ConfigStore(child).read()).agents[0].sessionId, 'adapter-coordinator');
+  assert.equal((await store.read()).agents[0].sessionId, 'parent-coordinator');
+  await a.events.get('session_shutdown')();
+  await writeFile(new ConfigStore(child).file, '{broken');
+  await a.passiveStart();
+  await assert.rejects(a.invoke('activate'));
+  assert.equal(await readFile(new ConfigStore(child).file, 'utf8'), '{broken');
+});
 
 test('adapter without root flag ignores ancestor config and inherited root env', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
@@ -309,7 +352,7 @@ test('single extension registers all agreed tools without starting resources in 
     registerFlag: (name, options) => flags.set(name, options), getFlag: () => assert.fail('flags resolve only during session_start') });
   assert.equal(flags.get('intercom-root').type, 'string');
   assert.equal(flags.get('intercom-root').default, undefined);
-  assert.equal(tools.size, 20);
+  assert.equal(tools.size, 21);
   assert.equal(tools.get('intercom_configure_monitor').parameters.minProperties, 1);
   assert.equal(tools.get('intercom_configure_monitor').parameters.additionalProperties, false);
   for (const name of ['intercom_open_monitor', 'intercom_configure_monitor']) {
@@ -358,11 +401,13 @@ test('reminder stop tool routes through runtime with the owning cancellation sig
 test('adapter rejects untrusted/noninteractive startup before creating config', supportedHost, async t => {
   const a = await adapter(t);
   a.ctx.isProjectTrusted = () => false;
-  await assert.rejects(a.start(), /trust/);
+  await a.passiveStart();
+  await assert.rejects(a.invoke('activate'), /trust/);
   await assert.rejects(access(path.join(a.root, '.pi-intercom', 'config.json')), /ENOENT/);
   await assert.rejects(a.invoke('list'), /not initialized/);
   a.ctx.isProjectTrusted = () => true; a.ctx.mode = 'rpc';
-  await assert.rejects(a.start(), /interactive/);
+  await a.passiveStart();
+  await assert.rejects(a.invoke('activate'), /interactive/);
   await assert.rejects(access(path.join(a.root, '.pi-intercom', 'config.json')), /ENOENT/);
   assert.equal(a.messages.length, 0);
 });

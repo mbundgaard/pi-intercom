@@ -98,7 +98,13 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     })();
     try { await task.promise; } finally { if (monitorTask === task) monitorTask = undefined; }
   }
-  pi.on('session_start', async (_event, ctx) => {
+  let starting = false;
+  async function startSession(ctx: ExtensionContext, activate = false): Promise<void> {
+    if (starting) throw new Error('PiIntercom activation already in progress');
+    starting = true;
+    try { await initializeSession(ctx, activate); } finally { starting = false; }
+  }
+  async function initializeSession(ctx: ExtensionContext, activate: boolean): Promise<void> {
     const started = ++generation;
     activity.reset();
     const oldRuntime = runtime;
@@ -106,12 +112,29 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     await oldRuntime?.close();
     if (started !== generation) return;
     context = ctx;
-    if (!['win32', 'linux'].includes(process.platform) || ctx.mode !== 'tui') throw new Error('PiIntercom requires Windows or Linux interactive Pi. No resources started.');
-    if (!ctx.isProjectTrusted()) throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
+    if (!['win32', 'linux'].includes(process.platform) || ctx.mode !== 'tui') {
+      if (!activate) return;
+      throw new Error('PiIntercom requires Windows or Linux interactive Pi. No resources started.');
+    }
+    if (!ctx.isProjectTrusted()) {
+      if (!activate) return;
+      throw new Error('PiIntercom requires project trust before honoring shared project configuration.');
+    }
     // Flags become available at session_start, not extension factory time. Never
     // infer workspace authority from ancestors or inherited environment values.
     const workspaceRoot = pi.getFlag('intercom-root');
     if (workspaceRoot !== undefined && typeof workspaceRoot !== 'string') throw new Error('PiIntercom: intercom-root must be an explicit absolute path.');
+    let existing: ConfigStore | undefined;
+    try {
+      existing = workspaceRoot !== undefined
+        ? await ConfigStore.workspace(ctx.cwd, workspaceRoot)
+        : await ConfigStore.discover(ctx.cwd);
+    } catch (error) {
+      if (activate) throw error;
+      ctx.ui.notify(String(error), 'error'); return;
+    }
+    if (started !== generation) return;
+    if (!existing && !activate) return;
     runtime = new Intercom({
       cwd: ctx.cwd,
       sessionId: () => context!.sessionManager.getSessionId(),
@@ -128,7 +151,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       },
       notify: text => ctx.ui.notify(text, 'info'),
     }, {
-      launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot,
+      launch: launcher.launch, store: root => new PiConfigStore(root), workspaceRoot, requireExistingConfig: !activate,
       monitor: {
         open: request => ensureMonitorPane({ ...request,
           script: fileURLToPath(new URL('../dist/monitor.js', import.meta.url)),
@@ -152,7 +175,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
     });
     const current = runtime;
     try { await current.start(); }
-    catch (e) { if (runtime === current) runtime = undefined; ctx.ui.notify(String(e), 'error'); return; }
+    catch (e) { if (runtime === current) runtime = undefined; if (activate) throw e; ctx.ui.notify(String(e), 'error'); return; }
     if (started !== generation) { await current.close(); return; }
     try {
       if ((await current.state()).me?.coordinator) {
@@ -168,6 +191,20 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       if (started !== generation) return;
       ctx.ui.notify(String(error), 'warning');
     }
+  }
+  pi.on('session_start', async (_event, ctx) => { await startSession(ctx); });
+  pi.registerTool({
+    name: 'intercom_activate', label: 'Activate Intercom', exposure: 'direct',
+    description: 'Explicitly enable Intercom in this project. If no config exists, create it and register this session as coordinator. Otherwise connect using the existing config; never replace its coordinator. Does not launch workers. Use only when the user asks to activate Intercom.',
+    parameters: Type.Object({}),
+    async execute(_id, _args, signal, _update, ctx) {
+      signal?.throwIfAborted();
+      if (!runtime) await startSession(ctx, true);
+      signal?.throwIfAborted();
+      if (!runtime) throw new Error('Intercom activation interrupted; inspect session state before retrying');
+      const state = await runtime.state();
+      return { content: [{ type: 'text', text: JSON.stringify({ active: true, configPath: runtime.store.file, role: state.me?.coordinator ? 'coordinator' : state.me ? 'worker' : 'anonymous' }) }], details: {} };
+    },
   });
   pi.on('session_shutdown', async () => {
     generation++;
@@ -229,7 +266,7 @@ export default function intercomExtension(pi: ExtensionAPI): void {
       exposure: operation === 'report_handoff' ? 'model-only' : 'direct',
       async execute(_id, args, signal, _update, ctx) {
         signal?.throwIfAborted(); context = ctx;
-        if (!runtime) throw new Error('PiIntercom not initialized; inspect startup error.');
+        if (!runtime) throw new Error('PiIntercom not initialized (inactive). Ask the user to activate this project with intercom_activate; inspect any startup error first.');
         const current = runtime, started = generation;
         if (operation === 'close_monitor') {
           const state = await current.state();

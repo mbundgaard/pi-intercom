@@ -104,7 +104,7 @@ Linux `multiplexer: none` is explicitly unsupported: no terminal guessing, headl
 
 ### Startup and launchers
 
-**Strict root isolation (0.8.0):** The session's starting working directory is its config root. An explicit flag cannot widen this boundary. Only `<root>/.pi-intercom/config.json` is considered: there is no upward search, Git-root inference, or home-directory fallback. If that exact config is absent, startup creates a local coordinator config, opens a loopback listener, preserves the session/tab name, and waits for user input (no model turn). Invalid/unreadable local config is an error and is not overwritten. A session ID absent from an existing selected config, including a fork, is a worker, never a replacement coordinator.
+**Strict root isolation (0.8.0):** The session's starting working directory is its config root. An explicit flag cannot widen this boundary. Only `<root>/.pi-intercom/config.json` is considered: there is no upward search, Git-root inference, or home-directory fallback. If that exact config is absent, Intercom stays inactive: no config, listener, monitor, role assignment or prompt instructions. Ask Pi to activate Intercom; `intercom_activate` explicitly creates the config and starts this session as coordinator. Existing configs activate later sessions automatically using the saved coordinator identity. Activation never replaces an existing coordinator or launches workers. Globally installing the package does not enable every project. Untrusted or unsupported sessions remain inactive; explicit activation reports the applicable restriction. Invalid/unreadable local config is an error and is not overwritten. A session ID absent from an existing selected config, including a fork, is a worker, never a replacement coordinator.
 
 Created/resumed workers receive `--intercom-root /absolute/session/root` explicitly as a same-directory assertion, **not permission to read a parent config**. The supplied root must canonically equal the session working directory, and its exact config must already exist. A mismatched root is rejected before reading its config or creating startup resources. No environment variable selects a parent root. Shared-roster workers must start in the coordinator's root; create/resume requests for subfolders are rejected before launch instead of silently changing the working directory. Linked metadata/config paths that escape the root and stable redirects of an already validated root are rejected. Monitor/logging readers retain stricter rules and may reject even internal links. These guards cover config access and temporary-config cleanup. They do not sandbox all filesystem I/O, pin an already-running telemetry writer after filesystem changes, or provide an atomic defense against concurrent filesystem replacement.
 
@@ -361,6 +361,13 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.11.0 — explicit project activation
+
+- Stay inactive on startup when the exact project config is absent.
+- Add `intercom_activate` to create the project config and start its coordinator explicitly.
+- Automatically connect later sessions when the config exists, without replacing the saved coordinator.
+- Preserve malformed configs and reject conflicting or concurrent activation rather than silently recreating them.
 
 ### 0.10.0 — role model defaults
 

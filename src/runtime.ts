@@ -41,6 +41,8 @@ export interface RuntimeOptions {
   monitor?: MonitorOperations;
   /** Explicit launcher-provided root must equal canonical cwd; no parent-root exception. */
   workspaceRoot?: string;
+  /** Adapter startup must not recreate a config removed after discovery. */
+  requireExistingConfig?: boolean;
 }
 export class Intercom {
   store!: ConfigStore;
@@ -99,6 +101,7 @@ export class Intercom {
         ? await ConfigStore.workspace(this.host.cwd, this.options.workspaceRoot)
         : await ConfigStore.discover(this.host.cwd);
       assertValid();
+      if (!discovered && this.options.requireExistingConfig) fail('project config missing; explicit activation required');
       const root = discovered?.root ?? await realpath(this.host.cwd);
       assertValid();
       this.store = this.options.store?.(root) ?? discovered ?? new ConfigStore(root);
