@@ -230,7 +230,7 @@ The coordinator-only `intercom_configure_models` tool saves either or both field
 
 ## New Herdr core/app compatibility
 
-Intercom now detects `HC_TERMINAL_ID` and uses the reviewed **herdr-core 0.1.18** protocol. The Windows UI can be local or connected to a Linux/Windows core. Worker creation/resume, actual tab names, and monitor layout use a single verified core connection and the machine-owned `herdr-app` document. This is a source-backed adapter for the **herdr-app 0.1.13 layout format**, not a public versioned tab API. Unsupported layouts (including stacks and terminal floats) fail closed. Shared-state confirmation is not proof that a remote window rendered it.
+Intercom detects `HC_TERMINAL_ID` and uses Herdr's negotiated core protocol and advertised API methods. It does not pin or impose a minimum Herdr product release number. Worker launch checks the methods it needs before creating a terminal. The Windows UI can be local or connected to a Linux/Windows core. Worker creation/resume, actual tab names, and monitor layout use a single verified core connection and the machine-owned `herdr-app` document. This is a source-backed adapter for the **herdr-app 0.1.13 layout format**, not a public versioned tab API. Unsupported layouts (including stacks and terminal floats) fail closed. Shared-state confirmation is not proof that a remote window rendered it.
 
 Configured workers rename their own actual tab on startup/reload; the coordinator retains its title (for example, **Main**). New workers get a dedicated tab in the coordinator's space. No provider/model override or initial task is injected. Core launches retain independent worker lifetimes; creating a terminal is not proof of Pi readiness.
 
@@ -361,6 +361,13 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.11.1 — Herdr compatibility without release pins
+
+- Remove exact and minimum Herdr product-version restrictions from transport, monitor opening/closure and worker closure; compatible newer releases are accepted.
+- Treat permanent core IDs as opaque identities, not one UUID spelling.
+- Check required launch APIs before spawning; retain protocol, ownership and concurrent-document protections.
+- Identify rejected API methods and numeric error codes without leaking server payloads.
 
 ### 0.11.0 — explicit project activation
 

@@ -2,7 +2,7 @@
 
 ## Target topology and tested contracts
 
-- Core: `hc` / `herdr-core` **0.1.18**, running on Linux or Windows.
+- Core: current `hc` / `herdr-core`, running on Linux or Windows. Product release numbers are not pinned or range-gated. The baseline schema examined was 0.1.18; compatibility is checked through protocol negotiation, required methods and actual response shapes.
 - UI: Windows `herdr-app`, local or connected to a remote core.
 - Examined app source: public tag **v0.1.13**, commit `93b097f6e29fcb2d90a30dea2f03ce4e5dee7981`.
 - `HC_TERMINAL_ID` identifies a core terminal, not an app pane or tab. `herdr.space` and `herdr.tab` labels are placement IDs, not names.
@@ -13,7 +13,7 @@ The app's `src/mirror_sync.rs` reads/writes its machine-owned `herdr-app` docume
 
 Intercom uses this route to change the **actual tab name**, not merely a session title or label. Naming changes only the uniquely mapped worker tab. Launch preflight, terminal creation and dedicated-tab attachment share one bounded verified connection. Conflicts, disconnects and uncertain mutations are not replayed. The coordinator's tab name is preserved.
 
-This is a **source-backed private-format adapter**, not an upstream promise of a stable versioned UI API. Core documents are opaque JSON; core's version does not establish the connected app's version. Rows/columns and terminal/mod blocks are supported; the naming helper also accepts mod-only floats. Monitor layout intentionally requires a narrower float-free subset. Stacks, terminal floats, dynamic content and ambiguous identities fail closed.
+This is a **source-backed private-format adapter**, not an upstream promise of a stable versioned UI API. Core documents are opaque JSON; core's version does not establish the connected app's version. Intercom accepts compatible later product releases and prerelease labels without a release allowlist. Protocol generation/framing, permanent identity and supported document operations are still validated because they determine whether an operation can be performed correctly. Rows/columns and terminal/mod blocks are supported; the naming helper also accepts mod-only floats. Monitor layout intentionally requires a narrower float-free subset. Stacks, terminal floats, dynamic content and ambiguous identities fail closed.
 
 Unix uses an explicit `HC_SOCKET`, or the documented default endpoint only if no core config file could override it. This connects without spawning a core. An existing config requires explicit `HC_SOCKET`; its contents are not scraped for credentials. Windows can use an explicit endpoint, otherwise existing-core status is checked before `hc connect`; that preflight is not atomic protection against the core disappearing before connect.
 

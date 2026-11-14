@@ -157,8 +157,7 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
   const call: CoreCall = async (method, params) => { check(); const result = await invoke(method, params); check(); return result; };
   const identify = async () => {
     const status = await call('server.status', {});
-    const version = typeof status?.version === 'string' ? /^(\d+)\.(\d+)\.(\d+)$/.exec(status.version) : null;
-    if (!text(status?.core?.id) || !version || (Number(version[1]) === 0 && (Number(version[2]) < 1 || (Number(version[2]) === 1 && Number(version[3]) < 18)))) throw fail('core 0.1.18+ with permanent server identity required');
+    if (!text(status?.core?.id)) throw fail('permanent core identity required');
     return status.core.id as string;
   };
   const core = await identify();
@@ -338,7 +337,7 @@ export async function closeCoreMonitorPane(options: CoreMonitorOptions): Promise
   try {
     const state = JSON.parse(await readFile(file, 'utf8'));
     const status = await call('server.status', {});
-    if (status?.version !== '0.1.18' || !text(status?.core?.id)) throw fail('close preflight requires reviewed core 0.1.18 identity');
+    if (!text(status?.core?.id)) throw fail('close preflight requires permanent core identity');
     const core = status.core.id;
     validateOwner(state, root, options.sessionId, core, hash(JSON.stringify([root, options.sessionId, core])));
     if (state.caller !== caller) throw fail('ownership differs from current caller');
@@ -370,7 +369,7 @@ export async function closeCoreMonitorPane(options: CoreMonitorOptions): Promise
       }
     }
     const finalStatus = await call('server.status', {});
-    if (finalStatus?.core?.id !== core || finalStatus.version !== status.version) throw fail('core identity changed; no retry');
+    if (finalStatus?.core?.id !== core) throw fail('core identity changed; no retry');
     // Best-effort identity/descendant preflight, not an atomic child-registration
     // barrier. Do not run another task between the final checks and submission.
     const save = async () => {

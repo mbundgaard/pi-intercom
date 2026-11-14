@@ -10,15 +10,15 @@ async function fixture(t) {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const files = [path.join(dir, 'c.jsonl'), path.join(dir, 'w.jsonl')];
   await Promise.all(files.map((f, i) => writeFile(f, JSON.stringify({ type: 'session', id: i ? 'worker' : 'coordinator' }) + '\n')));
-  const core = 'a'.repeat(32), calls = [], processes = new Map([[100, { start: '10', state: 'S' }], [200, { start: '20', state: 'S' }]]);
+  const core = 'opaque-core-identity', calls = [], processes = new Map([[100, { start: '10', state: 'S' }], [200, { start: '20', state: 'S' }]]);
   const records = new Map([['t1', { address: 't1', state: 'live', created_ms: 1, foreground: { pid: 100 }, parent: null }], ['t2', { address: 't2', state: 'live', created_ms: 2, foreground: { pid: 200 }, parent: 't1' }]]);
-  const f = { version: 1, calls, processes, records, after: undefined, committed: false,
+  const f = { coreVersion: '2.0.0', version: 1, calls, processes, records, after: undefined, committed: false,
     value: { spaces: [{ id: 'sp1', name: 'Project', tabs: [1, 2].map(i => ({ id: `tb${i}`, name: i === 1 ? 'Main' : 'Worker', root: { id: `tb${i}`, type: 'row', children: [{ id: `p${i}`, type: 'block', content: { terminal: `t${i}` } }] } })) }] },
   };
   const call = async (method, params) => {
     calls.push({ method, params });
     let result;
-    if (method === 'server.status') result = { version: '0.1.18', core: { id: core, name: 'host' }, pid: 99 };
+    if (method === 'server.status') result = { version: f.coreVersion, core: { id: core, name: 'host' }, pid: 99 };
     else if (method === 'terminal.get') result = records.get(params.terminal);
     else if (method === 'terminal.list') result = { terminals: [...records.values()], hidden_finished: 0, machines: [] };
     else if (method === 'doc.get') result = { version: f.version, value: f.value };

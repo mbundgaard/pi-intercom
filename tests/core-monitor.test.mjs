@@ -212,13 +212,18 @@ test('different cores with colliding session/terminal/layout IDs cannot share ow
   assert.deepEqual(f.mutations(), []);
 });
 
-test('missing/old server identity and unsupported inputs fail before mutation', async t => {
-  for (const version of ['0.1.17', '0.0.99', 'garbage']) {
+test('compatible core releases support monitor open and close without version gating', async t => {
+  for (const version of ['0.1.19', '0.2.0', '1.0.0', '2.0.0-dev+build', '0.1.17']) {
     const f = await fixture(t); f.coreVersion = version;
-    await assert.rejects(ensureCoreMonitorPane(f.options), /0.1.18/); assert.deepEqual(f.mutations(), []);
+    await ensureCoreMonitorPane(f.options);
+    await closeCoreMonitorPane(f.options);
+    assert.equal((await f.ledger()).stage, 'closed');
   }
+});
+
+test('missing core identity and unsupported inputs fail before mutation', async t => {
   const f = await fixture(t); f.core = '';
-  await assert.rejects(ensureCoreMonitorPane(f.options), /permanent server identity/);
+  await assert.rejects(ensureCoreMonitorPane(f.options), /permanent core identity/);
   for (const change of [{ env: {} }, { env: { HC_TERMINAL_ID: 'remote/t1' } }, { placement: undefined }, { placement: 'focused' }, { script: 'relative.mjs' }, { node: '/bin/sh' }, { platform: 'darwin' }]) {
     f.calls.length = 0;
     await assert.rejects(ensureCoreMonitorPane({ ...f.options, ...change })); assert.deepEqual(f.calls, []);

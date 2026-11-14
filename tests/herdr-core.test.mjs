@@ -101,12 +101,12 @@ test('one verified connection binds all rename reads, CAS write and readback; ha
 });
 
 test('invalid preflight never starts connect, and handshake/instance mismatches never enter operation', async () => {
-  for (const before of [null, [], {}, { ...status(), version: '0.1.19' }, { ...status(), pid: 0 }]) {
+  for (const before of [null, [], {}, { ...status(), version: null }, { ...status(), pid: 0 }]) {
     const t = transport(); t.options.readStatus = async () => before;
     await assert.rejects(withCoreSession(async () => assert.fail('operation entered'), t.options));
     assert.equal(t.starts, 0);
   }
-  for (const change of [h => h.version = '0.1.19', h => h.generation = 2, h => h.framed = true,
+  for (const change of [h => h.version = null, h => h.generation = 2, h => h.framed = true,
     h => h.core.id = 'other', h => h.core.name = 'other', h => h.methods = [], h => h.features = null]) {
     const h = hello(); change(h); const t = transport(undefined, { hello: h });
     await assert.rejects(withCoreSession(async () => assert.fail('operation entered'), t.options));
@@ -117,6 +117,30 @@ test('invalid preflight never starts connect, and handshake/instance mismatches 
     const t = transport(undefined, { status: s ?? [] });
     await assert.rejects(withCoreSession(async () => assert.fail('operation entered'), t.options), /instance changed/);
   }
+});
+
+test('product releases do not gate compatible protocol operations', async () => {
+  for (const version of ['0.1.19', '0.2.0', '1.0.0', '2.0.0-dev+build', '0.1.17']) {
+    const f = fixture();
+    const t = transport((request, _child, reply) => { f.call(request.method, request.params).then(value => reply(request, value)); },
+      { before: {...status(), version}, status: {...status(), version}, hello: {...hello(), version} });
+    await withCoreSession(call => renameCoreTab('t1', 'Worker', call), t.options);
+    assert.equal(t.requests.filter(r => r.method === 'doc.set').length, 1);
+  }
+});
+
+test('missing operation capability is detected before callback or mutation', async () => {
+  const t = transport();
+  await assert.rejects(withCoreSession(() => assert.fail('entered'), {...t.options, requiredMethods:['terminal.run']}), /required API method unavailable: terminal.run/);
+  assert.deepEqual(t.requests.map(r => r.method), ['hello']);
+});
+
+test('API errors identify method and code without exposing server payloads', async () => {
+  const t = transport((request, child) => child.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'secret detail',data:'private'}})+'\n'));
+  await assert.rejects(withCoreSession(call => call('doc.get', {}), t.options), error => {
+    assert.match(error.message, /API rejected request doc.get; RPC code -32602/);
+    assert.doesNotMatch(error.message, /secret|private/); return true;
+  });
 });
 
 test('trailing data on a read is rejected before the next mutation can be sent', async () => {

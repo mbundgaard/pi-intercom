@@ -35,7 +35,7 @@ function requireProof(ok: unknown): asserts ok { if (!ok) throw blocked(); }
 const positive = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
 const alive = (p: ProcessIdentity | undefined, start: string) => !!p && p.start === start && !['Z', 'X', 'x'].includes(p.state);
 const localId = (v: unknown): v is string => typeof v === 'string' && !!v && v.length <= 256 && !/[\/\x00-\x20\x7f]/.test(v);
-const uuid = (v: unknown) => typeof v === 'string' && /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(v) && v.trim() === v;
+const coreId = (v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 256 && !/[\x00-\x1f\x7f]/.test(v);
 
 async function verifySessionHeader(file: string, id: string): Promise<void> {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -164,8 +164,8 @@ function noDescendants(list: any, target: WorkerPaneIdentity, own: WorkerPaneIde
  * immediately before ONE terminal.kill. There is no graceful-cancel enablement,
  * all-descendants guarantee, atomic identity/kill API, automatic retry or rm.
  * Default operations each use a fresh bound CoreSession, never reconnect mid-job.
- * Current shared transport deliberately pins core 0.1.18; later versions require
- * review. No API can establish remote app 0.1.13/rendering from core alone. */
+ * Compatibility is based on protocol and ownership evidence, not a product
+ * release number. Core identity alone does not prove remote UI rendering. */
 export function createCoreCloseProvider(options: CorePaneCloseOptions): CloseProvider | undefined {
   const env = options.env ?? process.env;
   if ((options.platform ?? process.platform) !== 'linux' || !env.HC_TERMINAL_ID) return;
@@ -190,10 +190,10 @@ export function createCoreCloseProvider(options: CorePaneCloseOptions): ClosePro
     };
     const query: CoreCall = async (method, params) => { guard(); const result = await call(method, params); guard(); return result; };
     const status = await query('server.status', {});
-    requireProof(status?.version === '0.1.18' && uuid(status.core?.id) && typeof status.core.name === 'string' && positive(status.pid));
+    requireProof(coreId(status?.core?.id) && typeof status.core.name === 'string' && positive(status.pid));
     const core = async () => {
       const fresh = await query('server.status', {});
-      requireProof(fresh?.version === status.version && fresh.core?.id === status.core.id &&
+      requireProof(fresh?.core?.id === status.core.id &&
         fresh.core?.name === status.core.name && fresh.pid === status.pid);
     };
     const canonical = async (file: string) => {

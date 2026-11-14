@@ -10,11 +10,12 @@ export type CoreCall = (method: string, params: Record<string, unknown>) => Prom
 const failure = (message: string) => new Error(`PiIntercom Herdr core: ${message}`);
 const MAX_BYTES = 1024 * 1024;
 
-const CORE_VERSION = '0.1.18';
+// Product releases are not protocol versions. Gate on negotiated protocol and capabilities.
+const versionLabel = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\x00-\x1f\x7f]/.test(value);
 const object = (value: any): value is Record<string, any> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const identity = (value: any): boolean => object(value) && typeof value.id === 'string' && value.id.length > 0 &&
   value.id.length <= 256 && typeof value.name === 'string';
-const statusValid = (value: any): boolean => object(value) && value.version === CORE_VERSION && identity(value.core) &&
+const statusValid = (value: any): boolean => object(value) && versionLabel(value.version) && identity(value.core) &&
   Number.isSafeInteger(value.pid) && value.pid > 0;
 const sameCore = (a: any, b: any): boolean => a.id === b.id && a.name === b.name;
 const READ_METHODS = new Set(['hello', 'server.status', 'terminal.get', 'terminal.list', 'doc.get']);
@@ -22,6 +23,8 @@ const READ_METHODS = new Set(['hello', 'server.status', 'terminal.get', 'termina
 export interface CoreSessionOptions {
   /** Explicit documented HC_SOCKET endpoint; no endpoint discovery or path guessing. */
   endpoint?: string;
+  /** Validate operation capabilities before permitting any mutation. */
+  requiredMethods?: readonly string[];
   /** Test-only trusted seams. Supplying startClient requires readStatus. */
   startClient?: () => ChildProcessWithoutNullStreams;
   readStatus?: () => Promise<unknown>;
@@ -82,7 +85,7 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 10000) throw failure('invalid session deadline');
   let input: Writable | undefined, output: Readable | undefined, cleanup: (() => void) | undefined;
   let closed = false, fatal: Error | undefined, mutationAttempted = false;
-  let pending: { id: string; resolve: (value: any) => void; reject: (error: Error) => void } | undefined;
+  let pending: { id: string; method: string; resolve: (value: any) => void; reject: (error: Error) => void } | undefined;
   let rejectSession!: (error: Error) => void;
   const failed = new Promise<never>((_, reject) => { rejectSession = reject; });
   const close = () => {
@@ -103,7 +106,7 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
   const call: CoreCall = (method, params) => {
     if (closed || fatal) return Promise.reject(fatal ?? failure('session is closed; do not replay'));
     if (pending || ++requests > 64 || (methods && !methods.has(method))) {
-      fail('concurrent, excessive or unsupported API request');
+      fail(methods && !methods.has(method) ? `unsupported API method ${method}` : 'concurrent or excessive API request');
       return Promise.reject(fatal);
     }
     const id = randomUUID();
@@ -112,7 +115,7 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
     catch { fail('invalid API request'); return Promise.reject(fatal); }
     if (Buffer.byteLength(request) > MAX_BYTES) { fail('API request exceeded limit'); return Promise.reject(fatal); }
     return new Promise((resolve, reject) => {
-      pending = { id, resolve, reject };
+      pending = { id, method, resolve, reject };
       if (!READ_METHODS.has(method)) mutationAttempted = true;
       try { input!.write(request, error => { if (error) fail('API request transport failed'); }); }
       catch { fail('API request transport failed'); }
@@ -126,7 +129,7 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
       if (!options.startClient && process.platform !== 'win32') throw failure('explicit HC_SOCKET required: Unix hc server status/connect may autostart; no client started');
       before = await (options.readStatus ?? cliStatus)();
       if (closed) throw fatal;
-      if (!statusValid(before)) throw failure('unsupported core status/version; no client started');
+      if (!statusValid(before)) throw failure('invalid core status identity; no client started');
       const child = options.startClient ? options.startClient() : spawn('hc', ['connect'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       input = child.stdin; output = child.stdout;
       cleanup = () => { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.kill(); };
@@ -162,16 +165,24 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
       let message: any;
       try { message = JSON.parse(line); } catch { return fail('invalid API response'); }
       if (!object(message) || !pending || message.id !== pending.id) return fail('uncorrelated API response');
-      if (message.jsonrpc !== '2.0' || Object.hasOwn(message, 'error') || !Object.hasOwn(message, 'result')) return fail('API rejected request');
+      if (message.jsonrpc !== '2.0' || Object.hasOwn(message, 'error') || !Object.hasOwn(message, 'result')) {
+        const code = Number.isSafeInteger(message.error?.code) ? `; RPC code ${message.error.code}` : '';
+        // Server messages/data may echo credentials or request payloads. Keep only
+        // our method name and the numeric error code in public diagnostics.
+        return fail(`API rejected request ${pending.method}${code}`);
+      }
       const current = pending; pending = undefined;
       current.resolve(message.result);
     });
     const hello = await call('hello', { generation: 1, framed: false });
-    if (!object(hello) || hello.generation !== 1 || hello.version !== CORE_VERSION || hello.framed !== false ||
+    if (!object(hello) || hello.generation !== 1 || !versionLabel(hello.version) || hello.framed !== false ||
       !identity(hello.core) || !Array.isArray(hello.methods) || !hello.methods.every((v: unknown) => typeof v === 'string') ||
       !Array.isArray(hello.features) || !hello.features.every((v: unknown) => typeof v === 'string') ||
       (before && !sameCore(hello.core, before.core))) throw failure('unsupported or changed core handshake');
     methods = new Set(hello.methods);
+    for (const method of ['server.status', ...(options.requiredMethods ?? [])]) {
+      if (!methods.has(method)) throw failure(`required API method unavailable: ${method}; no operation attempted`);
+    }
     const status = await call('server.status', {});
     if (!statusValid(status) || !sameCore(status.core, hello.core) || (before && status.pid !== before.pid)) throw failure('core instance changed before operation');
     const result = await operation(call);

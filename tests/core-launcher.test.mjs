@@ -17,7 +17,7 @@ const clone = value => structuredClone(value);
 // This fixture exercises real layout preflight/attachment without any HC access.
 function mock(overrides = {}) {
   const f = {
-    calls: [], core: { core: { id: 'core-id', name: 'host' }, version: '0.1.18', pid: 1234 },
+    calls: [], core: { core: { id: 'core-id', name: 'host' }, version: '2.0.0', pid: 1234 },
     caller: { address: 't1b', state: 'live', created_ms: 1, labels: { 'herdr.space': 'remote-space', 'herdr.tab': 'existing-tab' } },
     version: 1,
     value: { metadata: { preserve: true }, spaces: [{ id: 'remote-space', tabs: [{ id: 'existing-tab', name: 'Coordinator',
