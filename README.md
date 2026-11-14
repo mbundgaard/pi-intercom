@@ -28,7 +28,7 @@ The value is the loop: **delegate → report back → evaluate → decide the ne
 >
 > **0.8.0:** Config is restricted to the session working directory. No parent search or explicit-parent override; shared-config subfolder launches are refused.
 
-> **0.7.0:** Coordinator-local five-minute reminders follow worker calls. Use `intercom_stop_reminders` when nothing needs follow-up. Busy periods are skipped; shutdown/reload clears the timer.
+> **Coordination is event-driven.** Nothing is injected into the coordinator's context on a timer. The coordinator is woken only by a worker report, a worker message, or one notice when a worker stops without reporting.
 
 > **0.6.1:** Linux Herdr background save-handoff-and-close workflow, with saved public summaries in config and monitor/JSON details. Empty rosters no longer open a monitor; coordinator session/tab names are preserved.
 
@@ -136,9 +136,8 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
 | `intercom_worker_status` | `name?`, `offset?`, `limit?`, `probe?` | Configured sessions; local JSON by default, optional bounded endpoint checks for returned page |
 | `intercom_request_status` | `to` (worker name) | Coordinator; independent extension report |
-| `intercom_stop_reminders` | None | Coordinator; disable reminder timer until another qualifying worker call, without cancelling work |
 | `intercom_report_status` | None | Workers including anonymous; shared report function, never registration |
-| `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator, never approve/complete work |
+| `intercom_report_work` | `status`, `summary?` | Configured, responsibility-loaded workers; save a public report and notify coordinator (`clear` is silent), never approve/complete work |
 | `intercom_stop_worker` | `to` | Unsupported graceful cancellation; no side effects |
 | `intercom_close_worker` | `to` | Linux Herdr coordinator; request background handoff/save/settle/pane-close job, retain registration |
 | `intercom_report_handoff` | `jobId`, `summary` | Requested worker only; save concise public handoff, then finish the turn and wait |
@@ -153,26 +152,20 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 
 Anonymous `send`/`list` and all coordinator operations fail explicitly. Anonymous registration and status remain available. A dedicated repeat-registration operation and broader anonymous permissions remain **unresolved contract TODOs**, not silently added tools. If initial registration fails, the worker remains reachable and reports the error locally. Explicit user Pi `/reload` restarts this extension and repeats startup registration; status is not a substitute and there is no automatic retry.
 
-### Coordinator reminders (0.7.0)
+### What reaches the coordinator's context
 
-A coordinator-local timer wakes an idle agent to review delegated work. It is **not** an endpoint health ping, task assignment, worker retry, or crashed-process watchdog. It starts disarmed and does not change shared config or the wire protocol.
+There is no reminder timer and no `intercom_stop_reminders` tool. Delegating work, creating workers and reading status push nothing into the coordinator's conversation. Only these events do:
 
-- Valid coordinator calls to create, configure, resume, reload, request status from, message, or close a worker start/reset the timer **before the attempted operation**. A subsequent operation failure can still need follow-up, so it does not automatically cancel the timer.
-- Every five minutes, recheck coordinator identity and whether Pi is idle. Busy ticks are skipped, not queued. Worker replies, incoming reports, list/JSON status reads (including probes), and worker-to-worker/coordinator messages do not reset it.
-- `intercom_stop_reminders({})` disables reminders until the next qualifying call. It does not cancel workers, close jobs or model work. There is no automatic reminder-count cutoff.
-- Timers are in memory only. Shutdown, Pi `/reload`, or session replacement disposes them; startup does not restore or replay them. Reset/stop invalidates stale callbacks and older in-flight calls cannot re-arm after a later stop.
-- Aborting the owning tool's Pi run also disarms its reminder generation when that AbortSignal is available. This is **not universal Escape/Stop detection**: the host may later be in a separate retry/compaction run whose abort does not reach the original signal. Use the explicit stop tool to disable reminders reliably.
-- Reminder delivery uses Pi's existing user-message path. Host input rejection remains possible (including the documented compaction gap); reminders are not immediately retried. The next normal tick is a new periodic check, not proof of prior delivery.
+| Event | Message | Size |
+|---|---|---|
+| Worker files `blocked`, `needs_decision` or `ready_for_review` | `status: summary` | Summary up to 2000 characters |
+| Worker sends a message | The message text | Up to 48,000 characters; put long results in a file and send its path |
+| Worker ends its turn after coordinator work without reporting or messaging the coordinator | One fixed line: `Turn ended without a report or message to you.` | Once per assignment |
+| Worker registers, or answers `intercom_request_status` | Connection details | One short JSON line |
 
-The reminder contains only this fixed public text, never task payloads or private reasoning:
+`clear` retires a worker's saved report without notifying the coordinator. Worker activity, saved reports and connectivity stay in local files: the monitor shows them, and `intercom_worker_status` reads them on demand.
 
-> Intercom reminder: Review outstanding delegated work and worker reports. If follow-up is needed, take the next appropriate action. Do not assume workers have finished or stopped.
->
-> If there is genuinely nothing to follow up on, call `intercom_stop_reminders`. Otherwise, reminders continue every five minutes; a new worker call resets the timer.
->
-> This reminder does not authorize new work, retries, worker closure, or publication.
-
-Reload the coordinator's extension to register the new tool and timer logic. No existing live session is armed merely by installing the change.
+The idle notice is sent by the worker's extension when its Pi run settles; it uses no model call and no timer. It is sent at most once after each coordinator message, is not retried, and is skipped if the worker already reported or messaged the coordinator since that message. It reports that the turn ended, not that the work is finished. It does not detect a worker that crashed, lost its connection, or is still running; check those in the monitor or with `intercom_worker_status({ probe: true })`. Both coordinator and worker must run a version with this behavior.
 
 ## Config and wire contracts
 
@@ -264,7 +257,7 @@ The optional project-config section is:
 
 Older configurations without this section retain the defaults above. Configuration updates affect future automatic opening, not an existing pane. Explicit `intercom_open_monitor` calls must always supply `placement` as a string. The tool schema intentionally has no enum; its description lists the currently supported strings (`coordinator-tab` and `new-tab`), and runtime validation rejects unsupported values. If the agent does not know the user's choice, it must ask rather than guess or use the saved preference. The explicit placement does not change the saved automatic-opening preference. If the monitor already exists in a different placement, close it first; Intercom does not relocate it or create a duplicate. A manual close invalidates earlier automatic-opening requests, but does not disable `autoOpen`: a later startup/reload can reopen it when workers are registered. To keep it closed, disable automatic opening too. Concurrent operations may report a lock or partial-operation fence instead of succeeding; they are not automatically retried. Preferences are checked at automatic admission, not an atomic cancellation of an already-submitted Herdr command.
 
-Both placements preserve coordinator focus. New-tab placement creates a monitor pane in its own tab; close targets that recorded pane only, even if other panes were later added to the tab or the saved placement preference changed. Ownership uncertainty or partial creation/closure requires inspection, not blind retries. Legacy panes adopted from their label alone are not authorized for tool-driven closure; they require manual inspection. Close rechecks ownership before submitting one pane-close request and observes pane absence afterward; Herdr does not provide an atomic compare-and-close operation, and pane absence does not prove all child processes exited. Monitor controls do not arm worker-follow-up reminders and do not stop workers.
+Both placements preserve coordinator focus. New-tab placement creates a monitor pane in its own tab; close targets that recorded pane only, even if other panes were later added to the tab or the saved placement preference changed. Ownership uncertainty or partial creation/closure requires inspection, not blind retries. Legacy panes adopted from their label alone are not authorized for tool-driven closure; they require manual inspection. Close rechecks ownership before submitting one pane-close request and observes pane absence afterward; Herdr does not provide an atomic compare-and-close operation, and pane absence does not prove all child processes exited. Monitor controls do not stop workers.
 
 The table uses aligned **Worker | Connection | Report | Activity | Seen | Last activity** columns (activity age/detail give way first on narrow panes). Report is explicitly worker-authored and separate from host activity. Activity is the last reported `working`, `thinking`, `idle`, `closed`, or `unknown` state. Seen marks evidence older than 60 seconds with `(old)`; this is not a live connection indicator. Last activity uses fixed public labels such as Reading files, Running command or Writing response and can persist after the worker settles. Recent working/thinking/idle observations use restrained colors; old evidence remains neutral and explicitly marked. `NO_COLOR` disables styling. Version 0.5.2 adds a small footer label for the Intercom package version loaded by the monitor at startup; restart the monitor after updating to load the new version. Narrow panes use a compact version label and preserve the quit hint. No read-only banner or busy/idle count summary is shown. It reads the bounded config/log snapshot and performs read-only loopback health checks, then refreshes roughly three seconds after completion, without worker prompts or model calls. Checks are bounded by 750 ms per endpoint, a four-second batch budget, 16 concurrent requests and 256 workers; no overlapping batches or retries. Closing the monitor aborts checks. Only observed activity is shown, not inferred assignments/completion. Evidence over 60 seconds old is stale; missing evidence is unknown. The number of worker rows adapts to the pane height, with an omitted count when needed. The display is clipped to pane dimensions. In the monitor pane, use **↑/↓** to select a worker and **Enter** to toggle its details (configured responsibility and observed status). Selection follows the worker across roster reorder and scrolls the visible window. **Escape** closes details first, then quits; **q** or **Ctrl+C** always quits only the display process, never agents or their panes.
 
@@ -320,9 +313,9 @@ intercom_report_work({ status: "ready_for_review", summary: "Updated the parser 
 intercom_report_work({ status: "clear" })
 ```
 
-There is one latest report per worker. A new report replaces it; clear saves an empty tombstone and removes the report indicator. Summaries are explicitly public, non-secret text (up to 2000 characters). They are sent to the coordinator, may enter its conversation history, and are saved in machine-local `.pi-intercom/reports/`—not in the metadata logs. Do not include private reasoning, credentials or raw tool payloads.
+There is one latest report per worker. A new report replaces it; clear saves an empty tombstone and removes the report indicator without notifying the coordinator. Summaries are explicitly public, non-secret text (up to 2000 characters). They are sent to the coordinator, may enter its conversation history, and are saved in machine-local `.pi-intercom/reports/`—not in the metadata logs. Do not include private reasoning, credentials or raw tool payloads.
 
-The coordinator validates the configured worker identity, saves the report, then submits a notification through the normal message path. Receipt does not prove the coordinator evaluated it. Reports do not automatically approve changes, assign follow-up work, resume a worker, or declare a task complete. Ready for review means **the worker is asking for review**, not that validation has been independently accepted.
+The coordinator validates the configured worker identity, saves the report, then submits a short `status: summary` notification through the normal message path. Receipt does not prove the coordinator evaluated it. Reports do not automatically approve changes, assign follow-up work, resume a worker, or declare a task complete. Ready for review means **the worker is asking for review**, not that validation has been independently accepted.
 
 The monitor shows Report alongside observed Status. Enter opens the worker's current report, age and summary. Reports persist until replaced/cleared and may outlive a process restart; their timestamps are separate from activity age. Missing/unreadable reports show no report indicator, not proof there are no blockers. Removed workers' report files are not shown or automatically deleted. No automatic resend or recovery is added; if saving succeeds but notification fails, inspect the saved report before deciding whether to resend.
 
@@ -361,6 +354,13 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.12.0 — event-driven coordination
+
+- Remove the five-minute coordinator reminder and `intercom_stop_reminders`; nothing is injected into context on a timer.
+- Add one idle notice when a worker's turn ends after coordinator work without a report or message to the coordinator.
+- Store `clear` reports without notifying the coordinator, and shorten report notifications to `status: summary`.
+- Prefer the calling terminal's `HC_TERMINAL_SOCKET` when selecting the Herdr core, and name a stopped core registry writer in the launch error.
 
 ### 0.11.1 — Herdr compatibility without release pins
 

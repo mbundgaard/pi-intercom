@@ -21,7 +21,7 @@ const sameCore = (a: any, b: any): boolean => a.id === b.id && a.name === b.name
 const READ_METHODS = new Set(['hello', 'server.status', 'terminal.get', 'terminal.list', 'doc.get']);
 
 export interface CoreSessionOptions {
-  /** Explicit documented HC_SOCKET endpoint; no endpoint discovery or path guessing. */
+  /** Explicit core endpoint. Otherwise use the calling terminal's socket first. */
   endpoint?: string;
   /** Validate operation capabilities before permitting any mutation. */
   requiredMethods?: readonly string[];
@@ -35,9 +35,10 @@ export interface CoreSessionOptions {
 /** Resolve only documented Unix defaults. An existing config may override the
  * socket, so require explicit HC_SOCKET rather than silently ignoring that file. */
 export async function defaultCoreEndpoint(env: NodeJS.ProcessEnv = process.env, home = homedir(), uid = process.getuid?.()): Promise<string> {
-  if (env.HC_SOCKET !== undefined) {
-    if (!env.HC_SOCKET || !isAbsolute(env.HC_SOCKET) || env.HC_SOCKET.includes('\0')) throw failure('invalid explicit HC_SOCKET');
-    return env.HC_SOCKET;
+  const inheritedSocket = env.HC_TERMINAL_SOCKET ?? env.HC_SOCKET;
+  if (inheritedSocket !== undefined) {
+    if (!inheritedSocket || !isAbsolute(inheritedSocket) || /[\x00-\x1f\x7f]/.test(inheritedSocket)) throw failure('invalid inherited core socket');
+    return inheritedSocket;
   }
   const session = env.HC_SESSION ?? 'default';
   if (!/^[a-zA-Z0-9_-]+$/.test(session) || session.trim() !== session || session.length > 64) throw failure('unsupported HC_SESSION; set explicit HC_SOCKET');
@@ -123,7 +124,7 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
   };
   const run = async () => {
     let before: any;
-    const endpoint = options.endpoint ?? process.env.HC_SOCKET ?? (!options.startClient && process.platform !== 'win32' ? await defaultCoreEndpoint() : undefined);
+    const endpoint = options.endpoint ?? process.env.HC_TERMINAL_SOCKET ?? process.env.HC_SOCKET ?? (!options.startClient && process.platform !== 'win32' ? await defaultCoreEndpoint() : undefined);
     if (options.startClient || !endpoint) {
       if (options.startClient && !options.readStatus) throw failure('test client requires status preflight');
       if (!options.startClient && process.platform !== 'win32') throw failure('explicit HC_SOCKET required: Unix hc server status/connect may autostart; no client started');
@@ -169,7 +170,11 @@ export async function withCoreSession<T>(operation: (call: CoreCall) => Promise<
         const code = Number.isSafeInteger(message.error?.code) ? `; RPC code ${message.error.code}` : '';
         // Server messages/data may echo credentials or request payloads. Keep only
         // our method name and the numeric error code in public diagnostics.
-        return fail(`API rejected request ${pending.method}${code}`);
+        const registryStopped = message.error?.message === 'cannot save terminals: registry writer stopped';
+        const detail = registryStopped
+          ? '; Herdr core registry writer stopped: core recovery is required; do not retry worker creation or delete Intercom config'
+          : '';
+        return fail(`API rejected request ${pending.method}${code}${detail}`);
       }
       const current = pending; pending = undefined;
       current.resolve(message.result);

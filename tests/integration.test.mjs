@@ -236,12 +236,59 @@ test('work reports persist as public worker-authored state and notify without ap
     const [report] = await readWorkerReports(root, ['w']);
     assert.equal(report.status, status); assert.equal(report.sessionId, 'w');
     assert.equal((await readObservationSnapshot(root)).reports[0].status, status);
-    assert.match(c.messages.at(-1).text, /not approval or verified completion/);
+    assert.equal(c.messages.at(-1).text, `[Intercom worker report from Builder (w)]\n${status}: Public finding and requested decision`);
   }
   await w.runtime.tool('report_work', { status: 'clear' });
   assert.equal((await readWorkerReports(root, ['w']))[0].status, 'clear');
-  assert.equal(c.messages.length, before + 4);
+  assert.equal(c.messages.length, before + 3); // Retiring a report is stored silently.
   assert.equal(launches.length, 0);
+});
+const settle = runtime => runtime.workerSettled(new Set());
+test('a worker that stops without reporting sends exactly one idle notice; nothing is timed', async t => {
+  const { c, w } = await configured(t);
+  const before = c.messages.length;
+  await settle(w.runtime); // No coordinator work outstanding: silence.
+  assert.equal(c.messages.length, before);
+  await c.runtime.tool('send', { to: 'Builder', message: 'Please do the thing' });
+  assert.equal(c.messages.length, before); // Delegating pushes nothing to the coordinator.
+  await settle(w.runtime);
+  assert.equal(c.messages.length, before + 1);
+  assert.equal(c.messages.at(-1).text, '[Intercom worker idle from Builder (w)]\nTurn ended without a report or message to you.');
+  await settle(w.runtime); await settle(w.runtime);
+  assert.equal(c.messages.length, before + 1); // One notice per assignment, never repeated.
+});
+test('a report or message to the coordinator replaces the idle notice; clear and peer traffic do not', async t => {
+  const { c, w, start } = await configured(t);
+  for (const reply of [
+    () => w.runtime.tool('report_work', { status: 'ready_for_review', summary: 'Done; details in notes.md' }),
+    () => w.runtime.tool('send', { to: 'Coordinator', message: 'Question before I continue' }),
+  ]) {
+    await c.runtime.tool('send', { to: 'Builder', message: 'Assignment' });
+    await reply();
+    const count = c.messages.length;
+    await settle(w.runtime);
+    assert.equal(c.messages.length, count);
+  }
+  await c.runtime.tool('send', { to: 'Builder', message: 'Assignment' });
+  await w.runtime.tool('report_work', { status: 'clear' });
+  const count = c.messages.length;
+  await settle(w.runtime);
+  assert.equal(c.messages.length, count + 1); // Clearing told the coordinator nothing.
+  assert.match(c.messages.at(-1).text, /worker idle from Builder/);
+  const peer = await start('p');
+  await c.runtime.tool('configure_worker', { sessionId: 'p', name: 'Peer', description: 'Peer remit', port: peer.runtime.endpoint.port, projectDirectory: '.' });
+  await peer.runtime.reload();
+  await peer.runtime.tool('send', { to: 'Builder', message: 'Peer findings' });
+  const afterPeer = c.messages.length;
+  await settle(w.runtime); await settle(peer.runtime);
+  assert.equal(c.messages.length, afterPeer); // Peer messages create no coordinator obligation.
+});
+test('idle notices are accepted only from configured workers by the coordinator', async t => {
+  const { c, w } = await configured(t);
+  const message = { version: 1, kind: 'idle', from: 'w', to: 'c', payload: {} };
+  await assert.rejects(w.runtime.receive({ ...message, to: 'w' }), /permission/);
+  await assert.rejects(c.runtime.receive({ ...message, from: 'stranger' }), /configured worker/);
+  await assert.rejects(c.runtime.receive({ ...message, from: 'c' }), /configured worker/);
 });
 test('work reports reject anonymous/unloaded/coordinator senders, worker destinations and bad payloads', async t => {
   const { c, w, start, root } = await configured(t);

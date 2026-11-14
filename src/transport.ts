@@ -5,7 +5,7 @@ import { HANDOFF_KINDS, validateHandoffPayload, type HandoffKind } from './hando
 
 export const BODY_LIMIT = 64 * 1024;
 export const RECEIPT_TIMEOUT = 5000;
-export type Kind = 'message' | 'report' | 'registration' | 'status' | 'request_status' | 'reload' | 'stop' | 'close' | HandoffKind;
+export type Kind = 'message' | 'report' | 'registration' | 'status' | 'idle' | 'request_status' | 'reload' | 'stop' | 'close' | HandoffKind;
 export interface Envelope {
   version: 1;
   kind: Kind;
@@ -24,7 +24,7 @@ export function reportPayload(payload: Record<string, unknown>): { status: Repor
 }
 export function envelope(value: unknown): Envelope {
   const m = value as Envelope;
-  if (!m || m.version !== 1 || !['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close', ...HANDOFF_KINDS].includes(m.kind)) fail('invalid wire schema/version/kind');
+  if (!m || m.version !== 1 || !['message', 'report', 'registration', 'status', 'idle', 'request_status', 'reload', 'stop', 'close', ...HANDOFF_KINDS].includes(m.kind)) fail('invalid wire schema/version/kind');
   text(m.from, 'sender sessionId', 256); text(m.to, 'recipient sessionId', 256);
   if (m.correlationId !== undefined && (typeof m.correlationId !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/.test(m.correlationId))) fail('invalid correlation ID');
   if (!m.payload || Array.isArray(m.payload) || typeof m.payload !== 'object') fail('invalid payload');

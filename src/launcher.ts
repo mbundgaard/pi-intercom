@@ -67,7 +67,7 @@ export function launchers(options: LauncherOptions) {
         try {
           // Injection is a trusted test seam; production verifies hello/status
           // and the APIs needed for launch once, without reconnecting between steps.
-          return await (options.coreCall ? operation(options.coreCall) : withCoreSession(operation, { endpoint: env.HC_SOCKET, requiredMethods: ['terminal.get', 'terminal.run', 'terminal.label', 'doc.get', 'doc.set'] }));
+          return await (options.coreCall ? operation(options.coreCall) : withCoreSession(operation, { endpoint: env.HC_TERMINAL_SOCKET ?? env.HC_SOCKET, requiredMethods: ['terminal.get', 'terminal.run', 'terminal.label', 'doc.get', 'doc.set'] }));
         } catch (e) {
           if (attempted) throw Object.assign(new Error('HC worker launch or placement failed; outcome unknown, terminal/process and app tab may remain; no automatic cleanup/retry/replacement or legacy fallback'), { outcomeUncertain: true });
           fail(`HC launch preflight failed: ${String(e)}; no fallback or launch attempted`);

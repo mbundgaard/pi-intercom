@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import { locateTerminalTab, renameCoreTab, terminalAddress, withCoreSession } from '../dist/herdr-core.js';
+import path from 'node:path';
+import { defaultCoreEndpoint, locateTerminalTab, renameCoreTab, terminalAddress, withCoreSession } from '../dist/herdr-core.js';
+
+test('inherited terminal socket wins over unrelated default core settings', async () => {
+  const socket = path.resolve('owned-core.sock');
+  assert.equal(await defaultCoreEndpoint({HC_TERMINAL_SOCKET: socket, HC_SOCKET:path.resolve('other-core.sock')}), socket);
+  assert.equal(await defaultCoreEndpoint({HC_SOCKET:socket}), socket);
+  await assert.rejects(defaultCoreEndpoint({HC_TERMINAL_SOCKET:'relative',HC_SOCKET:socket}), /invalid inherited/);
+});
 
 const layout = () => ({ spaces: [{ id: 'sp1', name: 'Project', tabs: [{ id: 'tb1', name: '', root: { id: 'tb1', type: 'row', children: [{ id: 'p1', type: 'block', content: { terminal: 't1' } }] } }] }], futureField: { preserved: true } });
 function fixture() {
@@ -141,6 +149,15 @@ test('API errors identify method and code without exposing server payloads', asy
     assert.match(error.message, /API rejected request doc.get; RPC code -32602/);
     assert.doesNotMatch(error.message, /secret|private/); return true;
   });
+});
+
+test('known registry-writer failure gives an actionable diagnosis without exposing arbitrary data', async () => {
+  const t = transport((request, child) => child.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,error:{code:-32603,message:'cannot save terminals: registry writer stopped',data:{private:'secret'}}})+'\n'));
+  await assert.rejects(withCoreSession(call => call('terminal.get', {terminal:'t1'}), t.options), error => {
+    assert.match(error.message, /Herdr core registry writer stopped: core recovery is required/);
+    assert.doesNotMatch(error.message, /secret/); return true;
+  });
+  assert.deepEqual(t.requests.map(r => r.method), ['hello','server.status','terminal.get']);
 });
 
 test('trailing data on a read is rejected before the next mutation can be sent', async () => {

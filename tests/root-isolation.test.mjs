@@ -233,11 +233,10 @@ test('custom store cannot redirect validated root; create/resume only launch sam
   await assert.rejects(good.instance.tool('create_worker', { projectDirectory: 'nested/worker' }), /must equal.*forbidden parent config/);
   assert.equal(good.events.launches.length, 0);
   await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
-  await good.instance.tool('stop_reminders', {});
   const before = await good.instance.store.read();
   await assert.rejects(good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /must equal.*forbidden parent config/);
   assert.equal(probes, 0); assert.equal(good.events.launches.length, 0);
-  assert.equal(good.instance.resumeFences.size, 0); assert.equal(good.instance.reminders.cancel, undefined);
+  assert.equal(good.instance.resumeFences.size, 0);
   assert.deepEqual(await good.instance.store.read(), before);
   assert.equal((await good.instance.tool('list', {})).agents.find(a => a.sessionId === 'w').projectDirectory, 'nested/worker');
   await good.instance.tool('create_worker', { projectDirectory: '.' });

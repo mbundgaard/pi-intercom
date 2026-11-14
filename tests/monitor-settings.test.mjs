@@ -12,7 +12,6 @@ async function fixture(t) {
   const calls = [], endpoints = new Map(); let port = 30000;
   const options = {
     launch: async () => assert.fail('worker launch not expected'),
-    reminderClock: { schedule: () => assert.fail('monitor operation must not arm worker reminders') },
     observe: () => ({ record() {}, close() {} }),
     listen: async (_preferred, accept) => { const value = port++; endpoints.set(value, accept); return { port: value, close: async () => { endpoints.delete(value); } }; },
     send: async (port, message) => endpoints.get(port)(message),

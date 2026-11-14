@@ -150,7 +150,7 @@ export async function ensureCoreMonitorPane(options: CoreMonitorOptions): Promis
   // All identity reads and mutations share one verified connection. Repeated
   // coreCall invocations reconnect and cannot bind this multi-step operation.
   if (!options.call || options.call === coreCall) {
-    return withCoreSession(call => ensureCoreMonitorPane({ ...options, call }), { endpoint: env.HC_SOCKET });
+    return withCoreSession(call => ensureCoreMonitorPane({ ...options, call }), { endpoint: env.HC_TERMINAL_SOCKET ?? env.HC_SOCKET });
   }
   const root = await realpath(options.root);
   const invoke = options.call;
@@ -323,7 +323,7 @@ export async function closeCoreMonitorPane(options: CoreMonitorOptions): Promise
   const check = () => options.assertCurrent?.();
   check();
   if (!options.call || options.call === coreCall) {
-    return withCoreSession(call => closeCoreMonitorPane({ ...options, call }), { endpoint: env.HC_SOCKET });
+    return withCoreSession(call => closeCoreMonitorPane({ ...options, call }), { endpoint: env.HC_TERMINAL_SOCKET ?? env.HC_SOCKET });
   }
   const invoke = options.call;
   const call: CoreCall = async (method, params) => { check(); const result = await invoke(method, params); check(); return result; };

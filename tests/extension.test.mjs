@@ -352,7 +352,7 @@ test('single extension registers all agreed tools without starting resources in 
     registerFlag: (name, options) => flags.set(name, options), getFlag: () => assert.fail('flags resolve only during session_start') });
   assert.equal(flags.get('intercom-root').type, 'string');
   assert.equal(flags.get('intercom-root').default, undefined);
-  assert.equal(tools.size, 21);
+  assert.equal(tools.size, 20);
   assert.equal(tools.get('intercom_configure_monitor').parameters.minProperties, 1);
   assert.equal(tools.get('intercom_configure_monitor').parameters.additionalProperties, false);
   for (const name of ['intercom_open_monitor', 'intercom_configure_monitor']) {
@@ -372,30 +372,10 @@ test('single extension registers all agreed tools without starting resources in 
   assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
   assert.match(tools.get('intercom_reload_worker').description, /NOT Pi extension reload/);
-  assert.match(tools.get('intercom_stop_reminders').description, /Coordinator only/);
-  assert.deepEqual(Object.keys(tools.get('intercom_stop_reminders').parameters.properties), []);
+  assert.equal(tools.has('intercom_stop_reminders'), false); // No timed context injection.
   await assert.rejects(tools.get('intercom_list').execute('test', {}, undefined, undefined, {}), /not initialized/);
   await events.get('session_shutdown')();
   await events.get('session_shutdown')();
-});
-
-test('reminder stop tool routes through runtime with the owning cancellation signal', supportedHost, async t => {
-  const a = await adapter(t); await a.start();
-  const original = Intercom.prototype.tool;
-  const controller = new AbortController();
-  let received;
-  Intercom.prototype.tool = async function(operation, args, id, signal) {
-    received = { operation, args, id, signal };
-    return { stopped: true };
-  };
-  t.after(() => { Intercom.prototype.tool = original; });
-  const tool = a.tools.get('intercom_stop_reminders');
-  const result = await tool.execute('stop-test', {}, controller.signal, undefined, a.ctx);
-  assert.deepEqual(received, { operation: 'stop_reminders', args: {}, id: 'stop-test', signal: controller.signal });
-  assert.deepEqual(JSON.parse(result.content[0].text), { stopped: true });
-  received = undefined; controller.abort();
-  await assert.rejects(tool.execute('cancelled', {}, controller.signal, undefined, a.ctx), /abort/i);
-  assert.equal(received, undefined, 'an already-cancelled tool must not reach runtime');
 });
 
 test('adapter rejects untrusted/noninteractive startup before creating config', supportedHost, async t => {
@@ -685,4 +665,29 @@ test('unavailable models, failed selection and busy startup report errors withou
   assert.ok(a.notices.some(n => n.text.includes('could not select configured model')));
   a.setIdle(false); await a.start(); assert.equal(attempts,1);
   assert.ok(a.notices.some(n => n.text.includes('reload when idle')));
+});
+
+test('agent_settled sends the idle notice through the real adapter hook, once', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  await a.invoke('configure_worker', { sessionId: 'idle-worker', name: 'Builder', description: 'Saved', port: 12346, projectDirectory: '.' });
+  const received = [];
+  const coordinator = await listen(undefined, async message => { received.push(message); });
+  t.after(() => coordinator.close());
+  a.setId('idle-worker'); await a.start(); // Replaces the coordinator runtime with the worker's.
+  const store = new ConfigStore(a.root);
+  await store.update('adapter-coordinator', config => { config.agents.find(agent => agent.coordinator).port = coordinator.port; });
+  const original = Intercom.prototype.workerSettled; let notice;
+  Intercom.prototype.workerSettled = function (...args) { notice = original.apply(this, args); return notice; };
+  t.after(() => { Intercom.prototype.workerSettled = original; });
+  const worker = (await store.read()).agents.find(agent => agent.sessionId === 'idle-worker');
+  received.length = 0;
+  await a.events.get('agent_settled')({}, a.ctx); await notice;
+  assert.deepEqual(received.filter(m => m.kind === 'idle'), []); // Nothing assigned: silence.
+  await send(worker.port, { version: 1, from: 'adapter-coordinator', to: 'idle-worker', kind: 'message', payload: { message: 'Assignment' } });
+  assert.match(a.messages.at(-1).content, /Assignment/);
+  await a.events.get('agent_settled')({}, a.ctx); await notice;
+  await a.events.get('agent_settled')({}, a.ctx); await notice;
+  const idle = received.filter(m => m.kind === 'idle');
+  assert.equal(idle.length, 1);
+  assert.deepEqual({ from: idle[0].from, to: idle[0].to, payload: idle[0].payload }, { from: 'idle-worker', to: 'adapter-coordinator', payload: {} });
 });

@@ -10,7 +10,7 @@ export const EVENT_TYPES = ['runtime.starting', 'runtime.ready', 'runtime.closed
 export type EventType = typeof EVENT_TYPES[number];
 const OUTCOMES = ['attempted', 'returned', 'failed', 'http_receipt', 'handler_failed', 'started', 'settled', 'snapshot', 'ended', 'written', 'removed', 'ready'] as const;
 const ERROR_CODES = ['operation_failed', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EADDRINUSE', 'EACCES', 'EPERM', 'ENOENT', 'ENOSPC'] as const;
-const KINDS = ['message', 'report', 'registration', 'status', 'request_status', 'reload', 'stop', 'close', 'close_prepare', 'close_identity', 'close_request', 'handoff_report', 'close_ready', 'close_commit'] as const;
+const KINDS = ['message', 'report', 'registration', 'status', 'idle', 'request_status', 'reload', 'stop', 'close', 'close_prepare', 'close_identity', 'close_request', 'handoff_report', 'close_ready', 'close_commit'] as const;
 const OPERATIONS = ['configure_worker', 'set_multiplexer', 'remove_worker', 'create_worker', 'resume_worker', 'port_update', 'initialize'] as const;
 export interface EventMetadata {
   peerSessionId?: string;
