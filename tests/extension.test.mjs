@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, createGitWorkspace, git } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import extension from '../dist/index.js';
 import { AgentSession } from '@earendil-works/pi-coding-agent';
@@ -15,6 +16,7 @@ import { readObservationSnapshot } from '../dist/snapshot.js';
 // These exercise the Windows/Linux adapter, but never construct a Pi host or launch a process.
 async function adapter(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'intercom-quality-adapter-'));
+  await createGitWorkspace(root);
   // Never let a mocked worker use the real host terminal or desktop connection.
   const isolatedKeys = Object.keys(process.env).filter(key => key.startsWith('HC_') || key.startsWith('HERDR_'));
   const inheritedHerdr = new Map(isolatedKeys.map(key => [key, process.env[key]]));
@@ -157,7 +159,7 @@ test('empty roster skips monitor; first registered worker requests it without pr
   assert.equal(a.widgets.length, 0);
   assert.equal(a.messages.length, 0);
   assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
-  await a.invoke('configure_worker', {sessionId:'saved-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
+  await a.invoke('configure_worker', {...workspaceFields,sessionId:'saved-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
   assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
   await a.invoke('send', {to:'Coordinator',message:'Messaging works without monitor'});
   assert.equal(a.messages.length, 1);
@@ -171,10 +173,10 @@ test('monitor settings suppress automatic opening; explicit tools use runtime gu
   const a = await adapter(t), store = new ConfigStore(a.root);
   await store.initialize('adapter-coordinator', 12345);
   await store.update('adapter-coordinator', config => { config.monitor = { autoOpen: false, placement: 'new-tab' }; });
-  await store.configure('adapter-coordinator', {sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
+  await store.configure('adapter-coordinator', {...workspaceFields,sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
   await a.start();
   assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
-  await a.invoke('configure_worker', {sessionId:'other-worker',name:'Other',description:'Saved',port:12347,projectDirectory:'.'});
+  await a.invoke('configure_worker', {...workspaceFields,sessionId:'other-worker',name:'Other',description:'Saved',port:12347,projectDirectory:'.'});
   assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false);
   await a.invoke('configure_monitor', { autoOpen: true });
   assert.equal(a.notices.some(n => /monitor|Herdr/i.test(n.text)), false, 'settings alone never open a pane');
@@ -222,7 +224,7 @@ test('automatic opening honors saved placement and explicit opening works with e
     await a.start(); assert.equal(requests.length, 0);
     await a.invoke('open_monitor', { placement: 'coordinator-tab' }); assert.equal(requests.length, 1); assert.equal(requests[0].placement, 'coordinator-tab');
     await a.invoke('configure_monitor', { placement: 'new-tab' }); assert.equal(requests.length, 1);
-    await a.invoke('configure_worker', {sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
+    await a.invoke('configure_worker', {...workspaceFields,sessionId:'saved-worker',name:'Worker',description:'Saved',port:12346,projectDirectory:'.'});
     assert.equal(requests.length, 2); assert.equal(requests[1].placement, 'new-tab');
     assert.deepEqual((await store.read()).monitor, { autoOpen: true, placement: 'new-tab' });
   } finally { Intercom.prototype.tool = original; Intercom.prototype.autoOpenMonitor = originalAuto; }
@@ -247,9 +249,9 @@ test('manual close fences in-flight automatic open and queued passes without ret
     return original.call(this, guard);
   };
   try {
-    const first = a.invoke('configure_worker', {sessionId:'first-worker',name:'First',description:'Saved',port:12346,projectDirectory:'.'});
+    const first = a.invoke('configure_worker', {...workspaceFields,sessionId:'first-worker',name:'First',description:'Saved',port:12346,projectDirectory:'.'});
     await started;
-    const second = a.invoke('configure_worker', {sessionId:'second-worker',name:'Second',description:'Saved',port:12347,projectDirectory:'.'});
+    const second = a.invoke('configure_worker', {...workspaceFields,sessionId:'second-worker',name:'Second',description:'Saved',port:12347,projectDirectory:'.'});
     await written; await new Promise(resolve => setImmediate(resolve));
     await assert.rejects(a.invoke('close_monitor'), /locked/);
     release(); await Promise.all([first, second]);
@@ -260,7 +262,7 @@ test('manual close fences in-flight automatic open and queued passes without ret
 test('startup with a saved disconnected worker still requests monitor without renaming coordinator', supportedHost, async t => {
   const a = await adapter(t), store = new ConfigStore(a.root);
   await store.initialize('adapter-coordinator', 12345);
-  await store.configure('adapter-coordinator', {sessionId:'offline-worker',name:'Offline',description:'Retained worker',port:12346,projectDirectory:'.'});
+  await store.configure('adapter-coordinator', {...workspaceFields,sessionId:'offline-worker',name:'Offline',description:'Retained worker',port:12346,projectDirectory:'.'});
   await a.start();
   assert.ok(a.notices.some(n => /not inside Herdr/.test(n.text)));
   assert.deepEqual(a.names, []);
@@ -369,7 +371,7 @@ test('single extension registers all agreed tools without starting resources in 
   assert.deepEqual(Object.keys(tools.get('intercom_close_monitor').parameters.properties), []);
   assert.deepEqual([...events.keys()], ['session_start', 'session_shutdown', 'input', 'agent_start', 'agent_settled', 'message_update', 'tool_execution_start', 'tool_execution_end', 'before_agent_start']);
   const configure = tools.get('intercom_configure_worker');
-  assert.deepEqual([...configure.parameters.required].sort(), ['description', 'name', 'port', 'projectDirectory', 'sessionId']);
+  assert.deepEqual([...configure.parameters.required].sort(), ['branch', 'description', 'name', 'port', 'projectDirectory', 'sessionId', 'worktree']);
   assert.match(tools.get('intercom_stop_worker').description, /disabled/);
   assert.match(tools.get('intercom_reload_worker').description, /NOT Pi extension reload/);
   assert.equal(tools.has('intercom_stop_reminders'), false); // No timed context injection.
@@ -390,6 +392,27 @@ test('adapter rejects untrusted/noninteractive startup before creating config', 
   await assert.rejects(a.invoke('activate'), /interactive/);
   await assert.rejects(access(path.join(a.root, '.pi-intercom', 'config.json')), /ENOENT/);
   assert.equal(a.messages.length, 0);
+});
+
+test('packaged rules are injected once per run and worker checks are silent until invalid', supportedHost, async t => {
+  const a = await adapter(t); await a.start();
+  const rules = await readFile(new URL('../rules.md', import.meta.url), 'utf8');
+  let prompt = (await a.prompt()).systemPrompt;
+  assert.equal(prompt.split(rules).length, 2);
+  assert.equal(a.events.has('tool_call'), false, 'no file/shell operation blocking');
+  await a.invoke('configure_worker', { ...workspaceFields, sessionId: 'rules-worker', name: 'Builder', description: 'Scoped implementation', port: 12346, projectDirectory: '.' });
+  a.setId('rules-worker'); await a.start();
+  const before = a.messages.length;
+  prompt = (await a.prompt()).systemPrompt;
+  assert.equal(prompt.split(rules).length, 2);
+  assert.match(prompt, /Identity: Builder/);
+  assert.match(prompt, /Branch: work\/test/);
+  assert.equal(a.messages.length, before, 'validation does not submit agent messages');
+  await git(path.join(a.root, '.worker'), 'checkout', '-b', 'work/changed');
+  prompt = (await a.prompt()).systemPrompt;
+  assert.ok(prompt.includes(rules));
+  assert.match(prompt, /NOT READY.*configured branch/);
+  assert.doesNotMatch(prompt, /Identity: Builder/);
 });
 
 test('adapter startup is passive, adds responsibility, routes idle/steering and replaces session listener', supportedHost, async t => {
@@ -466,15 +489,15 @@ test('adapter anonymous configure/reload loads responsibility without a work tur
   assert.equal(registrations.length, 1); assert.equal(registrations[0].kind, 'registration');
   assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
   const workerPort = registrations[0].payload.port;
-  await store.configure('other-coordinator', { sessionId: 'adapter-worker', name: 'Quality', port: workerPort,
+  await store.configure('other-coordinator', { ...workspaceFields, sessionId: 'adapter-worker', name: 'Quality', port: workerPort,
     projectDirectory: '.', description: 'Only review explicitly assigned work' });
-  assert.match((await a.prompt()).systemPrompt, /Anonymous\/unloaded worker/);
+  assert.match((await a.prompt()).systemPrompt, /NOT READY/);
   const control = { version: 1, kind: 'reload', from: 'other-coordinator', to: 'adapter-worker', payload: {} };
   a.failName(true);
   await assert.rejects(send(workerPort, control), /injected name failure/);
   assert.equal(a.messages.length, 0);
-  assert.match((await a.prompt()).systemPrompt, /Only review explicitly assigned work/);
-  // Failed name sync leaves useful endpoint and loaded responsibility intact, with explicit reload recovery.
+  assert.match((await a.prompt()).systemPrompt, /NOT READY/);
+  // Failed name sync retains the endpoint, but cannot authorize work until successful reload.
   a.failName(false); await send(workerPort, control);
   assert.deepEqual(a.names, ['Quality']);
   assert.equal(a.messages.length, 0);
@@ -596,7 +619,7 @@ test('shutdown during pending legacy migration fences the write and new monitor 
 
 test('worker name-sync failure still retains its endpoint and configured permissions', supportedHost, async t => {
   const a = await adapter(t); await a.start();
-  await a.invoke('configure_worker', {sessionId:'name-failure-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
+  await a.invoke('configure_worker', {...workspaceFields,sessionId:'name-failure-worker',name:'Builder',description:'Saved worker',port:12346,projectDirectory:'.'});
   a.setId('name-failure-worker'); a.failName(true); await a.start();
   assert.ok(a.notices.some(n => /Name\/responsibility synchronization failed/.test(n.text)));
   await a.invoke('list');
@@ -625,7 +648,7 @@ test('model defaults persist without immediate switching and apply by role on st
   await a.invoke('configure_models', { coordinator: { provider: 'test', model: 'lead' }, worker: { provider: 'test', model: 'small' } });
   assert.deepEqual(calls, []);
   await a.start(); assert.deepEqual(calls, [{provider:'test',id:'lead'}]);
-  await a.invoke('configure_worker', {sessionId:'model-worker',name:'Builder',description:'Saved',port:12346,projectDirectory:'.'});
+  await a.invoke('configure_worker', {...workspaceFields,sessionId:'model-worker',name:'Builder',description:'Saved',port:12346,projectDirectory:'.'});
   a.setId('model-worker'); await a.start();
   assert.deepEqual(calls.at(-1), {provider:'test',id:'small'});
   await assert.rejects(a.invoke('configure_models', {worker:null}), /coordinator/i);
@@ -669,7 +692,7 @@ test('unavailable models, failed selection and busy startup report errors withou
 
 test('agent_settled sends the idle notice through the real adapter hook, once', supportedHost, async t => {
   const a = await adapter(t); await a.start();
-  await a.invoke('configure_worker', { sessionId: 'idle-worker', name: 'Builder', description: 'Saved', port: 12346, projectDirectory: '.' });
+  await a.invoke('configure_worker', { ...workspaceFields, sessionId: 'idle-worker', name: 'Builder', description: 'Saved', port: 12346, projectDirectory: '.' });
   const received = [];
   const coordinator = await listen(undefined, async message => { received.push(message); });
   t.after(() => coordinator.close());

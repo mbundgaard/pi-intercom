@@ -60,7 +60,10 @@ export function workerStatusPage(snapshot: ObservationSnapshot, options: { name?
       const age = now - Date.parse(timestamp);
       return Number.isFinite(age) && age >= 0 ? Math.floor(age / 1000) : null;
     };
-    const entry = { sessionId: agent.sessionId, name: agent.name, ...workerObservation(snapshot, agent.sessionId, now),
+    const entry = { sessionId: agent.sessionId, name: agent.name, description: agent.description,
+      worktree: agent.worktree ?? null, branch: agent.branch ?? null,
+      configuration: agent.worktree && agent.branch ? 'configured (not proof of loaded configuration)' : 'reconfiguration_required',
+      ...workerObservation(snapshot, agent.sessionId, now),
       connection: currentConnection(agent.sessionId, snapshot.connections, now),
       handoff: saved.handoff ? { ...saved.handoff, ageSeconds: ageSeconds(saved.handoff.updatedAt), selfReported: true } : null,
       closeJob: saved.closeJob ? { ...saved.closeJob, ageSeconds: ageSeconds(saved.closeJob.updatedAt) } : null,

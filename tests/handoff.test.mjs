@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, fakeValidateWorkspace } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -39,7 +40,7 @@ async function fixture(t, options = {}) {
     close: async (proof, id, guard, beforeSubmit) => { guard(); await beforeSubmit(); guard(); closes.push(proof); assert.equal(id, 'w'); return options.outcome ?? { paneClosed: true, workerExited: true }; },
     ...options.provider,
   };
-  const shared = { launch: async () => assert.fail('no launch'), observe: () => ({ record() {}, close() {} }),
+  const shared = { validateWorkspace: fakeValidateWorkspace, launch: async () => assert.fail('no launch'), observe: () => ({ record() {}, close() {} }),
     closeProvider: provider, closeTimeoutMs: options.timeout ?? 2000,
     send: async (port, message) => { wire.push(message); if (options.intercept) await options.intercept(message); await send(port, message); },
   };
@@ -71,7 +72,7 @@ async function fixture(t, options = {}) {
     }
   };
   await w.start();
-  await c.tool('configure_worker', { sessionId: 'w', port: w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Scoped work' });
+  await c.tool('configure_worker', { ...workspaceFields, sessionId: 'w', port: w.endpoint.port, projectDirectory: '.', name: 'Worker', description: 'Scoped work' });
   await c.tool('reload_worker', { to: 'Worker' });
   const entry = async () => {
     const value = (await c.store.read()).agents.find(a => a.sessionId === 'w');
@@ -259,7 +260,7 @@ test('coordinator reload with closing intent becomes uncertain and cannot replay
 test('same-ID reconfigure preserves handoff and closed job; validators reject private fields', async t => {
   const f = await fixture(t); const job = await f.request(); await f.prepared(); await f.report(job);
   f.w.workerSettled(new Set(['handoff-tool'])); await f.waitForJob('closed');
-  await f.c.tool('configure_worker', { sessionId: 'w', port: f.w.endpoint.port, projectDirectory: '.', name: 'Renamed', description: 'New responsibility' });
+  await f.c.tool('configure_worker', { ...workspaceFields, sessionId: 'w', port: f.w.endpoint.port, projectDirectory: '.', name: 'Renamed', description: 'New responsibility' });
   assert.equal((await f.entry()).handoff.jobId, job.jobId); assert.equal((await f.entry()).closeJob.state, 'closed');
   const config = await f.c.store.read(); config.agents.find(a => a.sessionId === 'w').closeJob.identity = identity;
   assert.throws(() => validateConfig(config));

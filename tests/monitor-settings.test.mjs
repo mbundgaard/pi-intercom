@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -83,7 +84,7 @@ test('explicit open requires placement despite saved settings, pins identity and
 test('automatic admission rechecks settings and roster after preflight while explicit open remains available', async t => {
   for (const change of ['disable', 'remove']) {
     const f = await fixture(t);
-    await f.c.store.configure('c', { sessionId: 'w', name: 'Worker', description: 'work', port: 12346, projectDirectory: '.' });
+    await f.c.store.configure('c', { ...workspaceFields, sessionId: 'w', name: 'Worker', description: 'work', port: 12346, projectDirectory: '.' });
     assert.equal((await f.c.getMonitorSettings()).autoOpen, true);
     assert.equal((await f.c.state()).config.agents.length, 2);
     if (change === 'disable') await f.c.tool('configure_monitor', { autoOpen: false });
@@ -97,7 +98,7 @@ test('automatic admission rechecks settings and roster after preflight while exp
 test('worker and anonymous operations are rejected before persistence or adapter calls', async t => {
   const f = await fixture(t); await f.w.start();
   for (const configured of [false, true]) {
-    if (configured) await f.c.store.configure('c', { sessionId: 'w', name: 'Worker', description: 'work', port: f.w.endpoint.port, projectDirectory: '.' });
+    if (configured) await f.c.store.configure('c', { ...workspaceFields, sessionId: 'w', name: 'Worker', description: 'work', port: f.w.endpoint.port, projectDirectory: '.' });
     const before = await readFile(f.c.store.file, 'utf8');
     for (const operation of ['configure_monitor', 'open_monitor', 'close_monitor']) {
       await assert.rejects(f.w.tool(operation, operation === 'configure_monitor' ? { autoOpen: false } : {}), /coordinator permission/);

@@ -45,7 +45,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
       '--pack-destination', temporary], repository, 60000).stdout);
     assert.equal(packed.length, 1);
     const paths = packed[0].files.map(file => file.path.replaceAll('\\', '/'));
-    for (const required of ['dist/monitor.js', 'dist/monitor-view.js']) {
+    for (const required of ['dist/monitor.js', 'dist/monitor-view.js', 'rules.md', 'src/workspace.ts', 'dist/workspace.js']) {
       assert.ok(paths.includes(required), `Tarball missing ${required}; build before running this test`);
     }
     for (const entry of paths) {
@@ -63,7 +63,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
     // A fresh process also catches accidental terminal startup during import.
     run(process.execPath, ['--input-type=module', '--eval', `
       import assert from 'node:assert/strict';
-      import { existsSync } from 'node:fs';
+      import { existsSync, readFileSync } from 'node:fs';
       import { createRequire } from 'node:module';
       import path from 'node:path';
       import { pathToFileURL } from 'node:url';
@@ -74,6 +74,7 @@ test('packed standalone monitor imports without Pi host peers', { timeout: 30000
         assert.throws(() => require.resolve(peer), { code: 'MODULE_NOT_FOUND' }, peer + ' unexpectedly resolves');
       }
       assert.ok(require.resolve('pi-intercom-tui'));
+      assert.match(readFileSync(path.join(installed, 'rules.md'), 'utf8'), /Change files only in your configured worktree/);
       const monitor = await import(pathToFileURL(path.join(installed, 'dist/monitor.js')).href);
       const view = await import(pathToFileURL(path.join(installed, 'dist/monitor-view.js')).href);
       assert.equal(typeof monitor.createMonitor, 'function');

@@ -37,7 +37,7 @@ export function envelope(value: unknown): Envelope {
   return m;
 }
 export interface Endpoint { port: number; close(): Promise<void> }
-export async function listen(preferred: number | undefined, accept: (message: Envelope) => Promise<void>, health?: () => { version: 1; sessionId: string }): Promise<Endpoint> {
+export async function listen(preferred: number | undefined, accept: (message: Envelope) => Promise<void>, health?: () => { version: 1; sessionId: string; busy?: boolean }): Promise<Endpoint> {
   const server = http.createServer(async (req, res) => {
     const reply = (status: number, data: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(data)); } };
     if (req.method === 'GET' && req.url === '/intercom/health') {
@@ -46,7 +46,7 @@ export async function listen(preferred: number | undefined, accept: (message: En
         else {
           const identity = health();
           if (identity.version !== 1 || typeof identity.sessionId !== 'string' || !identity.sessionId.trim() || identity.sessionId.length > 256) throw new Error('invalid health identity');
-          reply(200, { version: 1, sessionId: identity.sessionId });
+          reply(200, { version: 1, sessionId: identity.sessionId, ...(typeof identity.busy === 'boolean' ? { busy: identity.busy } : {}) });
         }
       } catch { reply(503, { error: 'health unavailable' }); }
       req.resume(); return;

@@ -86,7 +86,8 @@ export async function readObservationSnapshot(root: string): Promise<Observation
     result.truncated ||= config.agents.length > MAX_AGENTS;
     result.config = { multiplexer: config.multiplexer, agents: config.agents.slice(0, MAX_AGENTS).map(a => ({
       sessionId: a.sessionId, name: a.name, coordinator: a.coordinator, description: a.description,
-      projectDirectory: a.projectDirectory, port: a.port, ...publicCloseMetadata(a),
+      projectDirectory: a.projectDirectory, port: a.port,
+      ...(!a.coordinator ? { worktree: a.worktree, branch: a.branch } : {}), ...publicCloseMetadata(a),
     })) };
   } catch { result.errors.push('config_unavailable'); }
   try {

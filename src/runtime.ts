@@ -2,13 +2,15 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { LocalObserver, LOG_LIMITS, observationError, type Observer, type EventType, type EventMetadata } from './observability.js';
-import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, text, validateConfig, monitorSettings, validateMonitorSettings, validateModels, type ModelSelection, type ModelSettings, type MonitorSettings, type Agent, type Config } from './config.js';
+import { ConfigStore, coordinator, directory, fail, named, port, requireCoordinator, requireWorkspace, text, validateConfig, monitorSettings, validateMonitorSettings, validateModels, type ModelSelection, type ModelSettings, type MonitorSettings, type Agent, type Config } from './config.js';
 import { listen, send, reportPayload, type Endpoint, type Envelope, type Kind } from './transport.js';
 import { saveWorkerReport } from './reports.js';
 import { readObservationSnapshot } from './snapshot.js';
 import { workerStatusPage } from './worker-status.js';
 import { probeWorker, probeWorkers } from './connections.js';
 import { HandoffWorkflow, HANDOFF_KINDS, fencedClose, type CloseProvider, type HandoffKind } from './handoff.js';
+
+import { sameResponsibility, validateWorkerWorkspace, type WorkerWorkspace } from './workspace.js';
 
 export const UNSUPPORTED_CANCELLATION = 'Unsupported Pi host: stop_worker and legacy graceful-close control are disabled. Pi 0.84.4 extension abort does not cancel retry backoff/continuations; graceful shutdown cannot guarantee no queued work restarts. No cancellation or shutdown was performed. close_worker uses a separate supported-provider owned-pane closure contract, not graceful cancellation. See references/implementation-blocker.md. A verified supported host API is required for graceful cancellation (no version-only override).';
 export interface Host {
@@ -41,6 +43,8 @@ export interface RuntimeOptions {
   workspaceRoot?: string;
   /** Adapter startup must not recreate a config removed after discovery. */
   requireExistingConfig?: boolean;
+  /** Read-only validation seam for isolated runtime tests. */
+  validateWorkspace?: typeof validateWorkerWorkspace;
 }
 export class Intercom {
   store!: ConfigStore;
@@ -51,6 +55,8 @@ export class Intercom {
   private configuredRoot?: string;
   private configuredFile?: string;
   responsibility?: Agent;
+  private loadedWorkspace?: WorkerWorkspace;
+  private workspaceIssue?: string;
   private observer?: Observer;
   private closing?: Promise<void>;
   private reportWrites: Promise<void> = Promise.resolve();
@@ -127,7 +133,7 @@ export class Intercom {
       const own = previous?.agents.find(a => a.sessionId === this.id());
       const endpoint = await (this.options.listen ?? listen)(own?.port, m => { assertValid(); return this.receive(m); }, () => {
         assertValid();
-        return { version: 1, sessionId: this.initialId };
+        return { version: 1, sessionId: this.initialId, busy: this.host.busy() };
       });
       try { assertValid(); } catch (error) { await endpoint.close(); throw error; }
       this.endpoint = endpoint;
@@ -177,7 +183,7 @@ export class Intercom {
           }
         } catch (e) { assertValid(); this.host.notify(`Coordinator unreachable/registration failed; worker remains reachable: ${String(e)}. No retry. Anonymous registration repeat is an unresolved contract; use explicit Pi /reload to restart this extension, not report_status.`); }
         assertValid();
-        this.host.notify(`Intercom worker ready at 127.0.0.1:${this.endpoint.port}; waiting for explicit work.`);
+        this.host.notify(`Intercom worker listening at 127.0.0.1:${this.endpoint.port}; ${this.responsibility ? 'configuration loaded; waiting for explicit work' : 'not ready; configuration and successful reload required'}.`);
       }
       record('runtime.ready', { port: this.endpoint.port, role: me?.coordinator ? 'coordinator' : me ? 'worker' : 'anonymous', busy: this.host.busy(), outcome: 'ready' });
     } catch (e) {
@@ -198,6 +204,8 @@ export class Intercom {
     this.owesCoordinator = false;
     const endpoint = this.endpoint; this.endpoint = undefined;
     this.responsibility = undefined;
+    this.loadedWorkspace = undefined;
+    this.workspaceIssue = undefined;
     const closing = (async () => {
       try { if (endpoint) await endpoint.close(); }
       finally {
@@ -263,21 +271,79 @@ export class Intercom {
     if (!this.host.applyModel) fail('model selection unavailable in this host');
     await this.host.applyModel(selection);
   }
+  private invalidateWorkspace(reason: string): void {
+    this.responsibility = undefined;
+    this.loadedWorkspace = undefined;
+    this.workspaceIssue = reason;
+  }
+  private validateWorkspace(agent: Agent): Promise<WorkerWorkspace> {
+    requireWorkspace(agent);
+    return (this.options.validateWorkspace ?? validateWorkerWorkspace)(this.store.root, agent);
+  }
+  /** Supplies instructions once per agent run, never once per tool operation. */
+  async beforeRunInstructions(): Promise<string> {
+    const generation = this.generation;
+    try {
+      const assertValid = this.validity();
+      const { me, config } = await this.state();
+      assertValid();
+      if (!me) {
+        this.invalidateWorkspace('worker is not configured');
+        return 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.';
+      }
+      if (me.coordinator) {
+        const missing = config.agents.filter(a => !a.coordinator && (!a.worktree || !a.branch)).map(a => a.name);
+        return `Identity: ${me.name} (${me.sessionId}). Responsibility: ${me.description}.\nProject/configuration root: ${this.store.root}.` +
+          (missing.length ? `\nWorkers with incomplete configuration: ${JSON.stringify(missing)}. Check their actual worktrees and branches, update each with intercom_configure_worker, then call intercom_reload_worker. Do not assign work until configuration is successfully loaded. Do not guess missing values; ask the user if they cannot be established.` : '');
+      }
+      requireWorkspace(me);
+      if (!this.responsibility) throw new Error(this.workspaceIssue ?? 'worker configuration is not loaded; successful reload required');
+      if (!sameResponsibility(me, this.responsibility)) fail('worker configuration changed; successful reload required');
+      const workspace = await this.validateWorkspace(me);
+      const fresh = await this.state();
+      assertValid();
+      if (!fresh.me || !sameResponsibility(me, fresh.me)) fail('worker configuration changed during validation; successful reload required');
+      this.loadedWorkspace = workspace;
+      this.workspaceIssue = undefined;
+      return `Identity: ${me.name} (${me.sessionId}). Responsibility: ${me.description}.\nProject/configuration root: ${this.store.root}.\nWorktree: ${workspace.worktree}. Branch: ${workspace.branch}.\nChange files only in that worktree, on that branch. Your tools still start in the project root; use explicit worktree paths.`;
+    } catch (error) {
+      // Hook exceptions are not an execution gate in Pi: always return explicit
+      // not-ready instructions instead of silently dropping the operating rules.
+      const reason = error instanceof Error ? error.message : 'worker configuration validation failed';
+      if (generation === this.generation) this.invalidateWorkspace(reason);
+      return `Intercom NOT READY: ${reason}\nDo not continue assigned work. Report the configuration problem to the coordinator and wait for correction and successful reload. Do not guess a workspace or fall back to the project root.`;
+    }
+  }
   async reload(): Promise<void> {
+    const generation = this.generation;
     const record = this.captureObserver();
     const assertValid = this.validity();
-    const { me, config } = await this.state();
-    assertValid();
-    if (!me) fail('worker not configured; configure_worker must run before reload_worker');
-    const selection = config.models?.[me.coordinator ? 'coordinator' : 'worker'];
-    await this.applyConfiguredModel(selection);
-    assertValid();
-    this.responsibility = { ...me };
-    // Coordinator is a routing identity, not ownership of the user's Pi/tab title.
-    if (!me.coordinator) await this.host.setName(me.name);
-    assertValid();
-    record('config.reloaded', { role: me.coordinator ? 'coordinator' : 'worker' });
-    this.host.notify(`Intercom responsibility loaded for ${me.name}; no work turn started.`);
+    try {
+      const { me, config } = await this.state();
+      assertValid();
+      if (!me) fail('worker not configured; configure_worker must run before reload_worker');
+      if (!me.coordinator && this.host.busy()) fail('worker configuration reload requires an idle worker');
+      this.invalidateWorkspace('configuration reload has not completed');
+      const workspace = me.coordinator ? undefined : await this.validateWorkspace(me);
+      assertValid();
+      const selection = config.models?.[me.coordinator ? 'coordinator' : 'worker'];
+      await this.applyConfiguredModel(selection);
+      assertValid();
+      // Coordinator is a routing identity, not ownership of the user's Pi/tab title.
+      if (!me.coordinator) await this.host.setName(me.name);
+      const fresh = await this.state();
+      assertValid();
+      if (!fresh.me || !sameResponsibility(me, fresh.me)) fail('configuration changed during reload; reload again when idle');
+      if (!me.coordinator && this.host.busy()) fail('worker became busy during reload; reload again when idle');
+      this.responsibility = { ...me };
+      this.loadedWorkspace = workspace;
+      this.workspaceIssue = undefined;
+      record('config.reloaded', { role: me.coordinator ? 'coordinator' : 'worker' });
+      this.host.notify(`Intercom responsibility loaded for ${me.name}; no work turn started.`);
+    } catch (error) {
+      if (generation === this.generation) this.invalidateWorkspace(error instanceof Error ? error.message : 'configuration reload failed');
+      throw error;
+    }
   }
   async transmit(to: string, kind: Kind, payload: Record<string, unknown> = {}): Promise<void> {
     const record = this.captureObserver();
@@ -302,7 +368,9 @@ export class Intercom {
     assertValid();
     if (me?.coordinator) fail('report_status is worker-only');
     if (!this.endpoint) fail('endpoint unavailable');
-    await this.transmit(coordinator(config).name, 'status', { port: this.endpoint.port, busy: this.host.busy() });
+    await this.transmit(coordinator(config).name, 'status', { port: this.endpoint.port, busy: this.host.busy(),
+      worktree: me?.worktree, branch: me?.branch,
+      workspaceState: this.responsibility && this.loadedWorkspace && me && sameResponsibility(me, this.responsibility) ? 'loaded' : 'not_ready' });
   }
   async receive(message: Envelope): Promise<void> {
     const record = this.captureObserver();
@@ -362,7 +430,10 @@ export class Intercom {
         }
         record('status.received', { ...metadata, busy: message.payload.busy as boolean, port: message.payload.port as number });
         if (sender) record('config.changed', { operation: 'port_update', peerSessionId: message.from, port: message.payload.port as number, outcome: 'written' });
-        notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender }));
+        notify('status', JSON.stringify({ sessionId: message.from, port: message.payload.port, busy: message.payload.busy, configured: !!sender,
+          worktree: sender?.worktree, branch: sender?.branch,
+          workspaceState: sender?.worktree && sender.branch && message.payload.workspaceState === 'loaded' &&
+            message.payload.worktree === sender.worktree && message.payload.branch === sender.branch ? 'loaded' : 'not_ready' }));
       }
       return;
     }
@@ -396,6 +467,7 @@ export class Intercom {
     if (message.kind === 'message') {
       if (!sender || !me) fail('agent messaging requires configured sender and recipient; anonymous permissions TODO');
       if (!this.responsibility) fail('worker must load responsibility before receiving work');
+      if (!me.coordinator && !sameResponsibility(me, this.responsibility)) fail('worker configuration changed; successful reload required before receiving work');
       if (this.handoff?.workerClosing || fencedClose(me.closeJob)) fail('worker close is active or uncertain; new Intercom work is fenced');
       notify('agent message', message.payload.message as string);
       if (sender.coordinator && !me.coordinator) this.owesCoordinator = true;
@@ -449,15 +521,16 @@ export class Intercom {
     }
     if (operation === 'report_status') { await this.report(); return { accepted: true }; }
     if (operation === 'report_work') {
-      if (!me || me.coordinator || !this.responsibility) fail('report_work requires a configured, responsibility-loaded worker');
+      if (!me || me.coordinator || (!this.responsibility && !(this.workspaceIssue && args.status === 'blocked'))) fail('report_work requires a configured, responsibility-loaded worker (or blocked configuration report)');
       const payload = reportPayload(args);
       await this.transmit(coordinator(config).name, 'report', payload);
       if (payload.status !== 'clear') this.owesCoordinator = false;
       return { accepted: true, coordinatorEvaluation: 'not awaited' };
     }
     if (operation === 'send') {
-      if (!me || !this.responsibility) fail('anonymous/unloaded worker cannot send agent messages (permissions TODO)');
+      if (!me) fail('anonymous/unloaded worker cannot send agent messages (permissions TODO)');
       const recipient = named(config, args.to as string);
+      if (!this.responsibility && !(this.workspaceIssue && recipient.coordinator)) fail('anonymous/unloaded worker cannot send agent messages (permissions TODO)');
       text(args.message, 'message', 48000);
       if (this.handoff?.workerClosing || fencedClose(me.closeJob) || this.handoff?.isClosing(recipient.sessionId) || fencedClose(recipient.closeJob)) fail('worker close is active or uncertain; new Intercom work is fenced');
       await this.transmit(args.to as string, 'message', { message: args.message });
@@ -506,12 +579,22 @@ export class Intercom {
       const relative = await directory(this.store.root, args.projectDirectory as string);
       assertConfigurable();
       const candidate: Agent = { sessionId: args.sessionId as string, name: args.name as string, description: args.description as string,
-        port: args.port as number, projectDirectory: relative, coordinator: false };
+        port: args.port as number, projectDirectory: relative, worktree: args.worktree as string, branch: args.branch as string, coordinator: false };
       if (candidate.sessionId === id) fail('cannot configure coordinator as worker');
       const previous = config.agents.find(a => a.sessionId === candidate.sessionId);
       if (fencedClose(previous?.closeJob)) fail('worker close is active or uncertain; configuration is fenced');
+      requireWorkspace(candidate);
       validateConfig({ ...config, agents: [...config.agents.filter(a => a.sessionId !== candidate.sessionId), candidate] });
-      await this.store.configure(id, args as unknown as Omit<Agent, 'coordinator'>, assertConfigurable);
+      if (previous?.worktree && previous.branch && (previous.worktree !== candidate.worktree || previous.branch !== candidate.branch)) {
+        // A last-observed activity log is not a live idle check. Unknown or
+        // unreachable workers cannot authorize changing an existing workspace.
+        const connection = await (this.options.probe ?? probeWorker)(previous, { signal: this.probeController.signal });
+        assertConfigurable();
+        if (connection.state !== 'connected' || connection.busy !== false) fail('worktree/branch changes require a verified idle worker; busy or unknown worker refused');
+      }
+      await this.store.configure(id, args as unknown as Omit<Agent, 'coordinator'>, assertConfigurable, current => {
+        if (JSON.stringify(current ?? null) !== JSON.stringify(previous ?? null)) fail('worker configuration changed during configure check; no update written');
+      });
       record('config.changed', { operation: 'configure_worker', peerSessionId: args.sessionId as string, peerName: args.name as string, outcome: 'written' });
       return { written: true, reloaded: false };
     }
@@ -539,6 +622,9 @@ export class Intercom {
       return { accepted: true, completion: 'not awaited' };
     }
     if (operation === 'resume_worker') {
+      requireWorkspace(target);
+      await this.validateWorkspace(target);
+      assertValid();
       if (args.confirmClosed !== true) fail('Resume requires explicit user confirmation that the previous worker session is closed (confirmClosed:true). Disconnected alone is not proof of closure.');
       if (this.resumeFences.has(target.sessionId)) fail('Resume already in flight or awaiting worker status; outcome may be uncertain. Inspect the worker before any retry; no automatic relaunch.');
       const relative = await directory(this.store.root, target.projectDirectory);
@@ -559,7 +645,7 @@ export class Intercom {
         assertValid();
         requireCoordinator(fresh.config, id);
         const current = fresh.config.agents.find(agent => agent.sessionId === target.sessionId && !agent.coordinator);
-        if (!current || current.port !== target.port || current.projectDirectory !== target.projectDirectory) fail('Worker configuration changed during resume check; no launch submitted.');
+        if (!current || current.port !== target.port || !sameResponsibility(current, target)) fail('Worker configuration changed during resume check; no launch submitted.');
         if (this.handoff?.isClosing(target.sessionId) || fencedClose(current.closeJob)) fail('worker close is active or uncertain; resume is fenced');
         fence.submitted = true;
         const result = await this.launchObserved({ multiplexer: fresh.config.multiplexer, cwd, workspaceRoot: this.store.root, sessionId: current.sessionId });

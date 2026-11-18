@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, fakeValidateWorkspace } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,12 +31,12 @@ async function fixture(t) {
     const host = { cwd: root, sessionId: () => id, busy: () => false,
       deliver: (text, busy) => messages.push({ text, busy }),
       setName: async name => { names.push(name); }, notify: text => notices.push(text) };
-    const runtime = new Intercom(host, { launch: async () => assert.fail('must not launch a process') });
+    const runtime = new Intercom(host, { validateWorkspace: fakeValidateWorkspace, launch: async () => assert.fail('must not launch a process') });
     runtimes.push(runtime); await runtime.start();
     return { runtime, host, messages, notices, names };
   }
   async function configure(coordinator, worker, id, name) {
-    await coordinator.runtime.tool('configure_worker', { sessionId: id, name,
+    await coordinator.runtime.tool('configure_worker', { ...workspaceFields, sessionId: id, name,
       port: worker.runtime.endpoint.port, projectDirectory: '.', description: `${name} assigned remit` });
     await coordinator.runtime.tool('reload_worker', { to: name });
   }
@@ -55,7 +56,7 @@ test('real HTTP runtime registration, passive configure/reload, peer delivery an
   assert.match(c.messages[0].text, /"sessionId":"worker-a"/);
   assert.equal((await c.runtime.store.read()).agents.length, 1);
   assert.equal(a.runtime.responsibility, undefined);
-  await c.runtime.tool('configure_worker', { sessionId: 'worker-a', name: 'Alpha', port: a.runtime.endpoint.port,
+  await c.runtime.tool('configure_worker', { ...workspaceFields, sessionId: 'worker-a', name: 'Alpha', port: a.runtime.endpoint.port,
     projectDirectory: '.', description: 'Alpha assigned remit' });
   assert.equal(a.runtime.responsibility, undefined);
   assert.equal(a.messages.length, 0);

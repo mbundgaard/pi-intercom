@@ -93,6 +93,10 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
         line(`  Connection: ${connection.state} · ${connection.reason}`),
         line(`  Checked: ${connection.checkedAt ?? 'never'} · ${Number.isFinite(checkedAge) && checkedAge >= 0 ? ageLabel(checkedAge) : 'age unknown'}`),
       ];
+      const workspaceDetails = [
+        line(`  Worktree: ${worker.worktree || 'Missing — reconfigure worker'}`),
+        line(`  Branch: ${worker.branch || 'Missing — reconfigure worker'}`),
+      ];
       const selected = start + offset === selectedIndex;
       const report = snapshot.reports?.find(report => report.sessionId === worker.sessionId && reportLabels[report.status]);
       lines.push(table(worker.name, connection.state, activity, age, evidence, report ? reportLabels[report.status] : '—', tone, selected));
@@ -117,6 +121,7 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
           ] : []),
           ...connectionDetails,
           line(`  Responsibility: ${worker.description || 'Not specified'}`),
+          ...workspaceDetails,
           line(`  Observed status: ${activity} · ${age}`),
           line(`  Last activity: ${evidence}`),
           ...(closeJob ? [line(`  Close updated: ${closeJob.updatedAt}`), line('  Workflow state is not proof all child processes terminated')] : []),
@@ -124,12 +129,13 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
       } else if (selected && showDetails && report) {
         const elapsed = now - Date.parse(report.updatedAt);
         const reportAge = !Number.isFinite(elapsed) || elapsed < 0 ? 'clock uncertain' : ageLabel(elapsed) + (elapsed > snapshot.staleAfterMs ? ' (old)' : '');
-        const contextRows = detailBudget >= 8 ? [
+        const contextRows = detailBudget >= 11 ? [
           paint('1', line(`  ${worker.name}`)),
           ...connectionDetails,
           line(`  Responsibility: ${worker.description || 'Not specified'}`),
+          ...workspaceDetails,
           line(`  Observed status: ${activity} · ${age}`),
-          ...(detailBudget >= 10 ? [line(`  Last activity: ${evidence}`)] : []),
+          ...(detailBudget >= 12 ? [line(`  Last activity: ${evidence}`)] : []),
         ] : [];
         selectedDetail = [
           ...contextRows,
@@ -140,6 +146,7 @@ export function renderMonitor(snapshot: ObservationSnapshot | undefined, width: 
       } else if (selected && showDetails) selectedDetail = [
         ...connectionDetails,
         line(`  Responsibility: ${worker.description || 'Not specified'}`),
+        ...workspaceDetails,
         line(`  Observed status: ${activity} · ${age}`),
         line(`  Last activity: ${evidence}`),
       ];

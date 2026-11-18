@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return new ConfigStore(root);
 }
-const worker = (id = 'worker', name = 'Builder') => ({ sessionId: id, name, port: 12345, description: 'Build only assigned work', projectDirectory: '.' });
+const worker = (id = 'worker', name = 'Builder') => ({ ...workspaceFields, sessionId: id, name, port: 12345, description: 'Build only assigned work', projectDirectory: '.' });
 test('atomic first creation publishes complete config: exactly one winner', async t => {
   const s = await fixture(t);
   const results = await Promise.all(Array.from({ length: 12 }, (_, i) => new ConfigStore(s.root).initialize(`session-${i}`, 12345)));

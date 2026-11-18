@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, fakeValidateWorkspace } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, rename, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ async function setup(t) {
   let nextPort = 30000;
   const endpoints = new Map(), all = [], wire = [], launches = [];
   const options = {
+    validateWorkspace: fakeValidateWorkspace,
     listen: async (_port, accept) => {
       const port = nextPort++; endpoints.set(port, accept);
       return { port, close: async () => { endpoints.delete(port); } };
@@ -67,7 +69,7 @@ async function publicationFixture(t, options) {
 }
 async function configured(t) {
   const f = await setup(t), c = await f.start('c'), w = await f.start('w');
-  await c.runtime.tool('configure_worker', { sessionId: 'w', port: w.runtime.endpoint.port, projectDirectory: '.', name: 'Builder', description: 'Build assigned tasks' });
+  await c.runtime.tool('configure_worker', { ...workspaceFields, sessionId: 'w', port: w.runtime.endpoint.port, projectDirectory: '.', name: 'Builder', description: 'Build assigned tasks' });
   await c.runtime.tool('reload_worker', { to: 'Builder' });
   return { ...f, c, w };
 }
@@ -209,7 +211,7 @@ test('anonymous registration explicitly hands ID/port/directory to agent, config
   assert.equal((await c.runtime.store.read()).agents.length, 1);
   await assert.rejects(w.runtime.tool('create_worker', {}), /permission/);
   await assert.rejects(w.runtime.tool('send', { to: 'Coordinator', message: 'x' }), /anonymous/);
-  await c.runtime.tool('configure_worker', { sessionId: 'w', port: w.runtime.endpoint.port, projectDirectory: '.', name: 'Builder', description: 'Remit' });
+  await c.runtime.tool('configure_worker', { ...workspaceFields, sessionId: 'w', port: w.runtime.endpoint.port, projectDirectory: '.', name: 'Builder', description: 'Remit' });
   assert.equal(w.runtime.responsibility, undefined); assert.equal(w.messages.length, 0);
   await c.runtime.tool('reload_worker', { to: 'bUILDER' });
   assert.equal(w.runtime.responsibility.description, 'Remit'); assert.deepEqual(w.names, ['Builder']); assert.equal(w.messages.length, 0);
@@ -276,7 +278,7 @@ test('a report or message to the coordinator replaces the idle notice; clear and
   assert.equal(c.messages.length, count + 1); // Clearing told the coordinator nothing.
   assert.match(c.messages.at(-1).text, /worker idle from Builder/);
   const peer = await start('p');
-  await c.runtime.tool('configure_worker', { sessionId: 'p', name: 'Peer', description: 'Peer remit', port: peer.runtime.endpoint.port, projectDirectory: '.' });
+  await c.runtime.tool('configure_worker', { ...workspaceFields, sessionId: 'p', name: 'Peer', description: 'Peer remit', port: peer.runtime.endpoint.port, projectDirectory: '.' });
   await peer.runtime.reload();
   await peer.runtime.tool('send', { to: 'Builder', message: 'Peer findings' });
   const afterPeer = c.messages.length;
@@ -570,7 +572,7 @@ test('close invalidates queued coordinator tool and status writes', async t => {
     const pending = operation === 'status'
       ? c.runtime.receive({ version: 1, kind: 'status', from: 'w', to: 'c', payload: { port: 49999, busy: false } })
       : operation === 'dashboard_port' ? c.runtime.retireDashboardMetadata()
-      : c.runtime.tool(operation, { to: 'Builder', multiplexer: 'none', sessionId: 'w2', name: 'Other', port: 40001, projectDirectory: '.', description: 'Other remit' });
+      : c.runtime.tool(operation, { ...workspaceFields, to: 'Builder', multiplexer: 'none', sessionId: 'w2', name: 'Other', port: 40001, projectDirectory: '.', description: 'Other remit' });
     const rejected = assert.rejects(pending, /inactive|replaced/);
     await reachedQueue;
     await c.runtime.close(); release(); await blocker; await rejected;

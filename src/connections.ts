@@ -7,6 +7,8 @@ export interface WorkerConnection {
   state: 'connected' | 'disconnected' | 'unknown';
   checkedAt: string | null;
   reason: ConnectionReason;
+  /** Present only when a verified endpoint supplied a boolean activity snapshot. */
+  busy?: boolean;
 }
 export interface ConnectionAgent { sessionId: string; port: number }
 export interface ProbeOptions { signal?: AbortSignal; timeoutMs?: number }
@@ -34,7 +36,7 @@ export function probeWorker(agent: ConnectionAgent, options: ProbeOptions = {}):
     let request: http.ClientRequest | undefined;
     let response: http.IncomingMessage | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (state: WorkerConnection['state'], reason: ConnectionReason) => {
+    const finish = (state: WorkerConnection['state'], reason: ConnectionReason, busy?: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -43,7 +45,7 @@ export function probeWorker(agent: ConnectionAgent, options: ProbeOptions = {}):
       request?.destroy();
       resolve(options.signal?.aborted
         ? unknown(agent.sessionId, 'aborted', new Date().toISOString())
-        : { sessionId: agent.sessionId, state, reason, checkedAt: new Date().toISOString() });
+        : { sessionId: agent.sessionId, state, reason, checkedAt: new Date().toISOString(), ...(typeof busy === 'boolean' ? { busy } : {}) });
     };
     const abort = () => finish('unknown', 'aborted');
     const error = (error: NodeJS.ErrnoException) => {
@@ -83,10 +85,10 @@ export function probeWorker(agent: ConnectionAgent, options: ProbeOptions = {}):
             !(body as { sessionId: string }).sessionId.trim() || (body as { sessionId: string }).sessionId.length > 256) {
             finish('unknown', 'malformed'); return;
           }
-          const identity = body as { version: number; sessionId: string };
+          const identity = body as { version: number; sessionId: string; busy?: unknown };
           if (identity.version !== 1) finish('unknown', 'unsupported_version');
           else if (identity.sessionId !== agent.sessionId) finish('disconnected', 'identity_mismatch');
-          else finish('connected', 'verified');
+          else finish('connected', 'verified', typeof identity.busy === 'boolean' ? identity.busy : undefined);
         });
       });
       request.on('error', error);

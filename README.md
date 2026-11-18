@@ -116,12 +116,30 @@ The `herdr` launcher selects the new core when `HC_TERMINAL_ID` is present; see 
 
 1. Coordinator calls `intercom_create_worker({projectDirectory:"."})`. The launcher passes the same-directory root assertion; no worker identity, responsibility or callback address is passed.
 2. Anonymous worker opens its own endpoint and sends its session ID, actual port and root-relative project directory to coordinator Pi. Registration starts a normal coordinator turn when idle or queues steering when busy. It creates **no config entry or hidden pending-registration map**.
-3. Coordinator decides and calls `intercom_configure_worker` with **all five explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`. This only writes config.
-4. Coordinator separately calls `intercom_reload_worker({to:"Builder"})`. Worker rereads responsibility and synchronizes Pi/Herdr tab names. **This is not Pi `/reload`, a restart, cancellation, or work assignment.** No model turn starts.
+3. Coordinator establishes the worker's real worktree and branch and calls `intercom_configure_worker` with **all seven explicit fields**: `sessionId`, `port`, `projectDirectory`, `name`, `description`, `worktree`, `branch`. This only writes config; Intercom does not create worktrees or branches.
+4. Coordinator separately calls `intercom_reload_worker({to:"Builder"})`. The idle worker validates and loads its own configuration by session ID, then synchronizes Pi/Herdr tab names. **This is not Pi `/reload`, a restart, cancellation, or work assignment.** No model turn starts.
 5. Coordinator sends explicit work using `intercom_send({to:"Builder",message:"..."})`. Workers can communicate directly with configured peers. Findings do not authorize unrelated implementation. Progress questions ask for reporting and continuation, not cancellation.
 6. Workers report as instructed and wait, without autonomous exit. Coordinator unavailability does not close the worker or cancel its assignment.
 
 Existing workers restore responsibility by session ID, bind their saved port or, if it is already in use, an OS-selected fallback, and report their actual port. Coordinator updates existing ports as bookkeeping. Status from removed/unknown sessions notifies Pi but creates no entry. Resume uses the configured project directory and full session ID, with a saved-session lookup first; a never-used Pi session might not yet exist on disk. Failure leaves config unchanged, without fabricated history or forced model turns.
+
+## Worker workspaces and operational rules
+
+[The packaged `rules.md`](rules.md) is the single source of Intercom operating instructions. The extension injects it through `before_agent_start`, alongside the session's identity and loaded configuration. It is supplied before each agent run, **not with each tool call or message**. An incoming steering message during an existing run does not trigger another check. Inactive projects receive no Intercom instructions.
+
+Every worker, including investigation/documentation workers, needs a nonblank `worktree` and `branch`; `none` is refused. These fields are worker-only. Worktree paths may be absolute or relative to the project root, including `../sibling-worktree`. The extension resolves them to an absolute path for worker instructions. Session startup and tool defaults remain in the project root: workers must use explicit worktree paths for file operations and project commands. Config discovery is unchanged; a worktree does not become a second Intercom config root.
+
+On startup, configuration reload, and before each worker agent run, the extension performs read-only filesystem/Git checks: the directory exists, is a worktree root separate from the project root, belongs to the same repository, and has the configured branch checked out. Detached HEAD and the `main` branch are refused. Git must be on PATH. Checks use argument arrays without a shell, ignore inherited Git routing overrides, and have a three-second Git subprocess budget with no retry. They never create, switch, commit, merge, push, or delete anything. Successful checks are silent and do not prompt the model.
+
+Failure clears the loaded configuration and supplies **NOT READY** instructions: report the problem, do not continue assigned work, and wait for correction and successful reload. A configured worker in this state can send a message to the coordinator or file a `blocked` report; it cannot use that exception to file a ready-for-review report or send peer messages. Failed reloads do not retain the old workspace as usable. A changed configuration requires explicit reload rather than silently adopting new values from disk or old conversation history. Incoming Intercom work requires a loaded, matching configuration.
+
+Changing an existing complete worktree/branch configuration requires a matching live endpoint reporting idle. Busy, unreachable, and older endpoints without an idle flag are refused; a saved activity log is not idle proof. Missing legacy fields can be supplied without this reassignment check because no complete workspace has been loaded. Reload itself also requires an idle worker. These checks are snapshots, not atomic locks against independent user input or external Git/filesystem changes. **File and shell tools remain unrestricted:** instruction delivery and validation are not a sandbox or a guarantee of agent compliance.
+
+### Existing configurations
+
+Old entries missing either workspace field remain readable and unchanged; they do not disable the coordinator or valid workers. Before every coordinator agent run, the extension lists workers needing migration and explicitly instructs it to establish their actual worktrees/branches, call `intercom_configure_worker`, then reload them. If the values cannot be established, it must ask the user rather than invent defaults. Missing fields prevent worker configuration loading and resume. An already-running worker is instructed to report the problem and wait. Reconfigure and reload each affected worker before assigning work. All participating sessions must load the updated extension code; `intercom_reload_worker` alone cannot upgrade an old extension.
+
+`intercom_list`, JSON worker status and monitor details carry the saved worktree/branch. These saved values are not evidence that a worker has loaded them. Extension status reports include `workspaceState` (`loaded` or `not_ready`), describing the last applied/validated configuration, not continuous Git health or task completion. Resume checks the workspace before launch, and the resumed worker independently validates and loads it again.
 
 ## Tools and permissions
 
@@ -130,8 +148,8 @@ Every tool rereads current config and checks the live Pi session ID. Names are c
 | Tool | Arguments | Permission / effect |
 |---|---|---|
 | `intercom_create_worker` | `projectDirectory?` (default `.`) | Coordinator; launch anonymous worker at the same root only |
-| `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description` | Coordinator; all five explicit fields, writes only |
-| `intercom_reload_worker` | `to` (worker name) | Coordinator; passive config/name reload |
+| `intercom_configure_worker` | `sessionId`, `port`, `projectDirectory`, `name`, `description`, `worktree`, `branch` | Coordinator; all seven fields required, writes only; existing workspace changes require verified idle worker |
+| `intercom_reload_worker` | `to` (worker name) | Coordinator; idle worker validates and loads config/name without a work turn |
 | `intercom_send` | `to` (name), `message` | Configured, responsibility-loaded sessions; asynchronous message |
 | `intercom_list` | None | Configured coordinator/workers; saved roster, never live health |
 | `intercom_worker_status` | `name?`, `offset?`, `limit?`, `probe?` | Configured sessions; local JSON by default, optional bounded endpoint checks for returned page |
@@ -188,11 +206,11 @@ Shared, source-controlled file: `<root>/.pi-intercom/config.json`. Do not ignore
 
 Legacy coordinator-only `dashboardPort` values are accepted for migration, but the browser dashboard has been retired in 0.4.1. Coordinator startup removes this field through the guarded config-write path. `intercom_list` returns the saved roster without `dashboardPort` or `dashboardUrl`; it does not probe live availability. The agent messaging `port` is unchanged.
 
-Workers have `coordinator:false` and an existing project directory equal to root or below it. Writes canonicalize directories and check real paths (including symlink escapes). Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
+Workers have `coordinator:false`, `worktree`, `branch`, and an existing `projectDirectory`. Launch/resume requires `projectDirectory` to equal the config root (`.`); legacy descendant entries remain readable but cannot launch. Writes canonicalize project directories and check real paths (including symlink escapes). Worktree paths use their own rule and may be outside the config root. Only coordinator extension operations write config; ordinary Pi file/shell tools are not restricted.
 
 Initial creation writes/fsyncs a complete temporary file then atomically publishes via a no-replace hard link. Contenders see only complete config; exactly one wins. Unsupported hard-link filesystems fail explicitly, without unsafe fallback. Interrupted staging files can remain as ignored `.tmp` files but are never mistaken for config. Updates are serialized, join Pi's file-mutation queue, validate, fsync a temporary file and atomically rename. Duplicate activation of the same coordinator session in multiple processes and external editors racing writes remain outside V1's guarantees (session locks deferred).
 
-HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning only protocol version and current session ID; it does not submit messages/model turns or write config. Envelope:
+HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 KiB. Version 0.5.1 also exposes side-effect-free `GET /intercom/health`, returning protocol version, current session ID, and (on workspace-aware versions) a boolean `busy` snapshot; it does not submit messages/model turns or write config. Envelope:
 
 ```json
 {"version":1,"kind":"message","from":"sender-session-id","to":"expected-recipient-session-id","payload":{"message":"explicit message"}}
@@ -200,13 +218,13 @@ HTTP binds **127.0.0.1 only**. `POST /intercom` accepts UTF-8 JSON, at most 64 K
 
 Handoff wire kinds (0.6.1): `close_prepare`, `close_identity`, `close_request`, `handoff_report`, `close_ready`, `close_commit`. These require configured roles, matching job/runtime identity and bounded validated payloads. Pane/process identity is ephemeral protocol data, never stored in public config or summaries.
 
-Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
+Other kinds: `message`, `report` (`status`, `summary`; configured worker → coordinator only), `registration` (`port`, `projectDirectory`), `status` (`port`, `busy`, and optional `worktree`, `branch`, `workspaceState`), `request_status`, `reload`, `stop`, `close` (empty control payload). Sender session identity is the envelope `from`; registration/status agent notifications include an explicit `sessionId` field. Agent messages require configured sender and recipient; controls require the current coordinator's sender ID and a worker recipient. Registration/unknown status are intentional exceptions to configured-sender checks, accepted only by coordinator. All receivers verify expected recipient ID, protecting against stale ports reaching another session. Local processes are trusted: this is role validation, **not authentication**. No remote networking/proxies/redirects or credentials.
 
 `202 {"accepted":true}` means Intercom extension receipt/dispatch, **not guaranteed Pi input acceptance, queueing, or model completion**. In Pi 0.84.4, `sendUserMessage` can reject during manual compaction after Intercom has acknowledged receipt: its void extension API reports the asynchronous rejection only as a local host error. Intercom has no delivery queue or retry to repair this gap; inspect the recipient's local error and arrange an explicit resend after compaction if needed. Replacing it with `sendMessage` is not a safe workaround because that path can start a concurrent run. Invalid/unsupported requests return an error; excessive bodies return 413. Request-status sends its report separately after accepting control. Starting in 0.2.1, Intercom always supplies `deliverAs: 'steer'`: Pi starts normally when idle and steers when busy. This avoids the idle-snapshot-to-busy race that caused “Agent is already processing” errors; it does not fix manual-compaction rejection. It does not hard-interrupt an executing tool. Each send resolves the recipient again from config; 5-second receipt deadline, **no retries**. Timeout means unknown outcome, not proof of nondelivery. No durable inbox, deduplication or replay log in V1.
 
 Version 0.2.0 telemetry adds an optional envelope `correlationId` for one transport attempt; legacy envelopes without it remain accepted. It is not agent identity, deduplication, a task ID, or a reply/completion guarantee.
 
-Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains in the shared config file. Name sync errors are surfaced; startup retains the useful endpoint, and explicit reload reports failure (Pi name/responsibility may already have changed before a Herdr tab rename fails).
+Tool text output is bounded to 50 KiB/2000 lines. The full saved roster remains in the shared config file. Name sync errors are surfaced; startup retains the useful endpoint, but failed reload clears loaded readiness (the Pi name may already have changed before a Herdr tab rename fails).
 
 ## Role model defaults
 
@@ -354,6 +372,13 @@ Windows/Linux validation includes a clean install, typecheck, tests, full-tree s
 Follow the [release procedure](references/releasing.md): review → choose an unused version/tag → update versions and changelog → validate → obtain explicit authorization → commit/push main → verify CI → create an annotated tag on that exact commit → push only that tag. Never trigger a second publisher, move tags, reuse published versions or blindly retry uncertain publication. Report success only after registry/artifact/linkage verification. Publishing does not install the extension or reload running sessions.
 
 The tag-only workflow is a source change for future releases; historical tags retain their original workflow snapshots. Any security findings must be resolved before the audit gate can pass.
+
+### 0.13.0 — worker worktrees and operational rules
+
+- Require explicit worker worktree/branch configuration, with automatic packaged operating instructions.
+- Validate the worker's actual Git workspace on startup, reload and before each agent run; never change Git state or tool working directories.
+- Keep legacy configs readable and tell the coordinator which workers require explicit migration; no defaults or automatic repairs.
+- Refuse busy/unknown existing-workspace reassignment and expose workspace fields in roster, status and monitor details.
 
 ### 0.12.0 — event-driven coordination
 

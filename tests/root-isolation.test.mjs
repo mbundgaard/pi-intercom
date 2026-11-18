@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, fakeValidateWorkspace } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, realpath, unlink, rename } from 'node:fs/promises';
 import path from 'node:path';
@@ -83,8 +84,8 @@ test('explicit parent roots reject before any config read, even with valid or ma
 test('explicit same-cwd worker uses only its local root config', async t => {
   const f = await fixture(t), local = new ConfigStore(f.child);
   await local.initialize('coordinator', 12345);
-  await local.configure('coordinator', { sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: '.' });
-  const { instance, events } = runtime(t, f.child, { workspaceRoot: f.child }, 'worker');
+  await local.configure('coordinator', { ...workspaceFields, sessionId: 'worker', name: 'Worker', description: 'Scoped work', port: 23456, projectDirectory: '.' });
+  const { instance, events } = runtime(t, f.child, { workspaceRoot: f.child, validateWorkspace: fakeValidateWorkspace }, 'worker');
   await instance.start();
   assert.equal(instance.store.root, await realpath(f.child)); assert.equal((await instance.state()).me.name, 'Worker');
   assert.deepEqual(events.stores, [await realpath(f.child)]); assert.deepEqual(events.observers, [await realpath(f.child)]);
@@ -228,11 +229,11 @@ test('custom store cannot redirect validated root; create/resume only launch sam
   await assert.rejects(bad.instance.start(), /retain validated session root/);
   assert.deepEqual(bad.events.observers, []); assert.deepEqual(bad.events.listens, []);
   let probes = 0;
-  const good = runtime(t, f.root, { probe: async () => { probes++; return { state: 'disconnected', checkedAt: null, reason: 'refused', sessionId: 'w' }; } });
+  const good = runtime(t, f.root, { validateWorkspace: fakeValidateWorkspace, probe: async () => { probes++; return { state: 'disconnected', checkedAt: null, reason: 'refused', sessionId: 'w' }; } });
   await good.instance.start();
   await assert.rejects(good.instance.tool('create_worker', { projectDirectory: 'nested/worker' }), /must equal.*forbidden parent config/);
   assert.equal(good.events.launches.length, 0);
-  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
+  await good.instance.tool('configure_worker', { ...workspaceFields, sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: 'nested/worker' });
   const before = await good.instance.store.read();
   await assert.rejects(good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true }), /must equal.*forbidden parent config/);
   assert.equal(probes, 0); assert.equal(good.events.launches.length, 0);
@@ -242,7 +243,7 @@ test('custom store cannot redirect validated root; create/resume only launch sam
   await good.instance.tool('create_worker', { projectDirectory: '.' });
   assert.equal(good.events.launches[0].workspaceRoot, await realpath(f.root));
   assert.equal(good.events.launches[0].cwd, await realpath(f.root));
-  await good.instance.tool('configure_worker', { sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: '.' });
+  await good.instance.tool('configure_worker', { ...workspaceFields, sessionId: 'w', name: 'Worker', description: 'Work', port: 23456, projectDirectory: '.' });
   await good.instance.tool('resume_worker', { to: 'Worker', confirmClosed: true });
   assert.equal(probes, 1);
   assert.equal(good.events.launches[1].workspaceRoot, await realpath(f.root));

@@ -12,6 +12,9 @@ export interface Agent {
   /** Legacy browser dashboard field, accepted for migration only; removed at coordinator startup. */
   dashboardPort?: number;
   projectDirectory: string;
+  /** Worker-only. Optional on disk solely so legacy entries can be migrated. */
+  worktree?: string;
+  branch?: string;
   handoff?: Handoff;
   closeJob?: CloseJob;
 }
@@ -46,6 +49,15 @@ export function text(value: unknown, field: string, max = 4096): asserts value i
 export function port(value: unknown): asserts value is number {
   if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 65535) fail('invalid port');
 }
+export function workspaceField(value: unknown, field: 'worktree' | 'branch'): asserts value is string {
+  text(value, field);
+  if (value !== value.trim() || /^none$/i.test(value) || /[\x00-\x1f\x7f]/.test(value)) fail(`invalid ${field}`);
+  if (field === 'branch' && value === 'main') fail('workers must not use the main branch');
+}
+export function requireWorkspace(agent: Pick<Agent, 'worktree' | 'branch'>): asserts agent is { worktree: string; branch: string } {
+  if (agent.worktree === undefined || agent.branch === undefined) fail('worker requires worktree and branch; reconfigure before reload or resume');
+  workspaceField(agent.worktree, 'worktree'); workspaceField(agent.branch, 'branch');
+}
 export function relativeDirectory(value: unknown): asserts value is string {
   text(value, 'projectDirectory');
   if (path.isAbsolute(value) || path.win32.isAbsolute(value) || value.split(/[\\/]/).includes('..')) fail('projectDirectory must be root-relative, without ..');
@@ -61,6 +73,10 @@ export function validateConfig(value: unknown): Config {
     text(a.sessionId, 'sessionId', 256); text(a.name, 'name', 128); text(a.description, 'description');
     if (a.name !== a.name.trim() || /[\r\n\x00-\x1f]/.test(a.name)) fail('invalid name');
     port(a.port); relativeDirectory(a.projectDirectory);
+    if (a.coordinator && (a.worktree !== undefined || a.branch !== undefined)) fail('worktree and branch are worker-only');
+    // Missing fields are migration state, not defaults. Present fields must be valid.
+    if (a.worktree !== undefined) workspaceField(a.worktree, 'worktree');
+    if (a.branch !== undefined) workspaceField(a.branch, 'branch');
     if (a.handoff !== undefined) { if (a.coordinator) fail('handoff is worker-only'); validateHandoff(a.handoff); }
     if (a.closeJob !== undefined) { if (a.coordinator) fail('closeJob is worker-only'); validateCloseJob(a.closeJob); }
     if (a.dashboardPort !== undefined) {
@@ -231,11 +247,16 @@ export class ConfigStore {
     });
     this.tail = operation.catch(() => {}); return operation;
   }
-  async configure(id: string, values: Omit<Agent, 'coordinator'>, assertValid: () => void = () => {}): Promise<Config> {
+  async configure(id: string, values: Omit<Agent, 'coordinator'>, assertValid: () => void = () => {}, checkPrevious?: (previous: Agent | undefined) => void): Promise<Config> {
     return this.update(id, async c => {
       if (values.sessionId === coordinator(c).sessionId) fail('cannot configure coordinator as worker');
+      checkPrevious?.(c.agents.find(a => a.sessionId === values.sessionId));
+      for (const field of ['sessionId', 'name', 'description', 'projectDirectory'] as const) {
+        if (typeof values[field] === 'string' && /^none$/i.test(values[field].trim())) fail(`invalid ${field}`);
+      }
+      requireWorkspace(values);
       const projectDirectory = await directory(this.root, values.projectDirectory);
-      const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, coordinator: false };
+      const a: Agent = { sessionId: values.sessionId, name: values.name, description: values.description, port: values.port, projectDirectory, worktree: values.worktree, branch: values.branch, coordinator: false };
       const index = c.agents.findIndex(old => old.sessionId === a.sessionId);
       if (index < 0) c.agents.push(a);
       else {

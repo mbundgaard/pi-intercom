@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Type, type TSchema } from 'typebox';
 import { getAgentDir, SessionManager, SettingsManager, truncateHead, withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -14,11 +15,11 @@ const modelSelection = Type.Union([Type.Null(), Type.Object({ provider: Type.Str
 const tools: [string, string, TSchema][] = [
   ['configure_models', 'Coordinator only. Save coordinator and/or worker provider/model defaults in project config. Null removes a default. Applies on startup or idle responsibility reload, not immediately. Manual model changes remain allowed; unavailable models produce an error without fallback.', Type.Object({ coordinator: Type.Optional(modelSelection), worker: Type.Optional(modelSelection) }, { minProperties: 1, additionalProperties: false })],
   ['create_worker', 'Coordinator only. Launch one anonymous worker at the coordinator root. projectDirectory defaults to root and must resolve to that same directory; subfolder launches cannot use a parent config and are refused. No assignment, configuration, or registration wait.', Type.Object({ projectDirectory: Type.Optional(Type.String()) })],
-  ['configure_worker', 'Coordinator only. Write explicit reported connection details and responsibility to config. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }) })],
-  ['reload_worker', 'Coordinator only. Ask worker to reread responsibility and synchronize names. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
+  ['configure_worker', 'Coordinator only. Write reported connection details, responsibility, and required worktree/branch to config. All seven fields are required; blank/none worktree or branch refused. Worktree may be absolute or project-root-relative, including siblings. Changing an existing workspace requires a verified idle worker. Does not notify, reload, or start work. Use reload_worker separately.', Type.Object({ sessionId: Type.String(), port: Type.Integer({ minimum: 1, maximum: 65535 }), projectDirectory: Type.String(), name: Type.String({ minLength: 1, maxLength: 128 }), description: Type.String({ minLength: 1, maxLength: 4096 }), worktree: Type.String({ minLength: 1, maxLength: 4096 }), branch: Type.String({ minLength: 1, maxLength: 4096 }) })],
+  ['reload_worker', 'Coordinator only. Ask idle worker to validate its worktree/branch, load its configuration and synchronize names. Missing legacy workspace fields require reconfiguration first. NOT Pi extension reload, cancellation, restart, or work assignment.', to],
   ['send', 'Configured sessions only. Send an explicit work/progress/findings message by recipient name. Idle delivery starts a turn; busy delivery steers at supported boundaries. Receipt is not an agent reply. Progress questions do not cancel assignments.', Type.Object({ to: Type.String(), message: Type.String({ minLength: 1, maxLength: 48000 }) })],
   ['worker_status', 'Configured sessions only. Read paginated JSON worker observations and public reports from local files, optionally by worker name. Last-observed status is not live liveness or task completion; reports are self-reported, not approval. Local-only by default; probe:true performs bounded loopback identity checks for this page only, without worker prompts or Telegram dependency. Disconnected means endpoint unreachable, not process termination. Follow nextOffset for further pages; null report means no readable active report.', Type.Object({ name: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), probe: Type.Optional(Type.Boolean()) })],
-  ['list', 'Configured sessions only. Read current saved names, responsibilities, session IDs, roles and ports. No live probing. Output limited to 50 KiB/2000 lines; full data remains in config.json.', Type.Object({})],
+  ['list', 'Configured sessions only. Read current saved names, responsibilities, worktrees, branches, session IDs, roles and ports. No live probing. Output limited to 50 KiB/2000 lines; full data remains in config.json.', Type.Object({})],
   ['request_status', 'Coordinator only. Ask worker extension to send an independent sessionId/port/busy report without a model turn on worker. No synchronous status reply.', to],
   ['report_work', 'Configured, responsibility-loaded workers only. Store one public report (blocked, needs_decision, ready_for_review) and notify the coordinator; clear retires it silently. Put long details in a file and reference its path. Summary required except clear (omit or empty). Never include private reasoning, credentials, raw tool payloads, or secrets. Receipt is not approval, verified completion, or permission for follow-up work.', Type.Object({ status: Type.String({ enum: ['blocked', 'needs_decision', 'ready_for_review', 'clear'] }), summary: Type.Optional(Type.String({ maxLength: 2000 })) })],
   ['report_status', 'Worker only (including anonymous). Send runtime sessionId/port/busy report to coordinator. This is NOT registration and creates no config entry.', Type.Object({})],
@@ -252,9 +253,16 @@ export default function intercomExtension(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;
     if (!runtime) return;
-    const { me } = await runtime.state();
-    const loaded = runtime.responsibility;
-    return { systemPrompt: event.systemPrompt + '\n\nPiIntercom: communicates; Pi decides orchestration. Responsibility is not a work assignment. Do not implement unrelated work from findings. After coordinator-assigned work, file intercom_report_work (or message the coordinator) before ending the turn, then wait; do not autonomously exit. Keep reports short: put long results in a file and reference its path. Worker reports are self-reported, not verified completion or approval. Progress questions require reporting and continuing unless explicitly redirected. stop_worker remains disabled due to the host cancellation blocker. close_worker is a separate Linux Herdr background handoff-and-pane-close workflow: do not self-exit, remove registration, force kill or infer completion from job acceptance.\n' + (me && loaded ? `Identity: ${loaded.name} (${me.sessionId}). Responsibility: ${loaded.description}.` : 'Anonymous/unloaded worker: wait for coordinator configuration and separate reload; do not treat registration as authorization to work.') };
+    const current = runtime, started = generation;
+    // Package-owned rules, not a project file or a skill the model must discover.
+    // Pi keeps these instructions for the run; tools/messages do not repeat them.
+    let rules: string;
+    try { rules = await readFile(new URL('../rules.md', import.meta.url), 'utf8'); }
+    catch { return { systemPrompt: event.systemPrompt + '\n\nIntercom NOT READY: packaged rules.md is unavailable. Report the problem and do not continue assigned work until the installation is repaired.' }; }
+    if (runtime !== current || generation !== started) return;
+    const instructions = await current.beforeRunInstructions();
+    if (runtime !== current || generation !== started) return;
+    return { systemPrompt: event.systemPrompt + '\n\n' + rules + '\n' + instructions };
   });
   for (const [operation, description, parameters] of tools) {
     pi.registerTool({

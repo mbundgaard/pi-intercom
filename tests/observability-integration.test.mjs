@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { workspaceFields, fakeValidateWorkspace } from './workspace-fixture.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -24,12 +25,12 @@ async function fixture(t, createObserver = (root, id) => new LocalObserver(root,
     const messages = [];
     const host = { cwd: root, sessionId: () => id, busy: () => false, setName: async () => {}, notify: () => {},
       deliver: (text, busy) => messages.push({ text, busy }) };
-    const runtime = new Intercom(host, { launch: async () => assert.fail('must not launch real workers'),
+    const runtime = new Intercom(host, { validateWorkspace: fakeValidateWorkspace, launch: async () => assert.fail('must not launch real workers'),
       observe: (directory, sessionId) => { const observer = createObserver(directory, sessionId); observers.push(observer); return observer; } });
     runtimes.push(runtime); await runtime.start(); return { runtime, host, messages };
   }
   async function configure(c, w) {
-    await c.runtime.tool('configure_worker', { sessionId: 'worker', name: 'Worker', description: 'Assigned remit',
+    await c.runtime.tool('configure_worker', { ...workspaceFields, sessionId: 'worker', name: 'Worker', description: 'Assigned remit',
       port: w.runtime.endpoint.port, projectDirectory: '.' });
     await c.runtime.tool('reload_worker', { to: 'Worker' });
   }
